@@ -91,7 +91,7 @@
     <input id="baseUrl" type="text" value="">
     <label>X-API-Key (webkey)</label>
     <input id="apiKey" type="password" placeholder="tu webkey">
-    <label>Tablota</label>
+    <label>Base de datos</label>
     <input id="tablotaId" type="text" value="default">
     <div class="check-row">
       <input id="mostrarLlamadas" type="checkbox" checked>
@@ -116,12 +116,12 @@
 
     <div class="divider"></div>
 
-    <h2>Subir tablota nueva</h2>
+    <h2>Subir base de datos nueva</h2>
     <label>Archivo CSV</label>
     <input id="archivoTablota" type="file" accept=".csv">
-    <label>tablota_id (opcional)</label>
+    <label>id de la base de datos (opcional)</label>
     <input id="nuevoTablotaId" type="text" placeholder="se genera si se deja vacio">
-    <button id="btnSubir" class="secondary" style="width:100%; margin-top:10px">Subir tablota</button>
+    <button id="btnSubir" class="secondary" style="width:100%; margin-top:10px">Subir base de datos</button>
     <div id="subirResultado" class="foot"></div>
   </div>
 
@@ -158,6 +158,13 @@ function addBubble(html, cls="bot"){
 
 function pill(estado){
   return `<span class="estado-pill">${estado}</span>`;
+}
+
+// "—" es el placeholder de "atributo no especificado en la descripcion" --
+// se muestra como "No" (mas claro), pero el valor real mandado a la API
+// (data-valor) sigue siendo "—".
+function mostrar(v){
+  return v === "—" ? "No" : v;
 }
 
 function escapeHtml(s){
@@ -255,7 +262,7 @@ function renderResultado(d, llamadaHtml=""){
   if (d.estado === "pregunta"){
     sessionId = d.session_id;
     const opciones = (d.pregunta.opciones || []).map(o =>
-      `<button type="button" data-valor="${escapeAttr(o)}">${escapeHtml(o)}</button>`
+      `<button type="button" data-valor="${escapeAttr(o)}">${escapeHtml(mostrar(o))}</button>`
     ).join("");
     const b = addBubble(
       `${pill("pregunta · " + d.pregunta.familia)}<div>${escapeHtml(d.pregunta.texto)}</div>
@@ -455,7 +462,7 @@ $("btnSubir").addEventListener("click", async ()=>{
       return;
     }
     $("subirResultado").innerHTML =
-      `OK: tablota_id="${escapeHtml(d.tablota_id)}" (${d.filas} filas, ${d.grupos_modelo_anio} grupos)${llamadaHtml}`;
+      `OK: base de datos id="${escapeHtml(d.tablota_id)}" (${d.filas} filas, ${d.grupos_modelo_anio} grupos)${llamadaHtml}`;
     $("tablotaId").value = d.tablota_id;
   }catch(e){ $("subirResultado").textContent = "Error de red: " + e.message; }
 });

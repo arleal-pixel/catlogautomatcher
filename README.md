@@ -23,10 +23,10 @@ Todas las rutas (salvo `/health`) requieren el header `X-API-Key: <webkey>`.
 **Nota:** `data/tablotas/*.csv` está en `.gitignore` a propósito — es el
 catálogo de vehículos/claves del asegurador, dato de negocio confidencial que
 no debe vivir en un repo. El servidor carga automáticamente cualquier CSV que
-encuentre ahí al arrancar (el nombre del archivo, sin extensión, es el
-`tablota_id`); coloca tu tablota real como `data/tablotas/default.csv` para
-que quede precargada como `tablota_id = "default"`, o súbela en caliente vía
-`POST /tablotas` — ver abajo.
+encuentre ahí al arrancar (el nombre del archivo, sin extensión, es el id de
+la base de datos, `tablota_id` en la API); coloca tu base de datos real como
+`data/tablotas/default.csv` para que quede precargada con id `"default"`, o
+súbela en caliente vía `POST /tablotas` — ver abajo.
 
 ## Flujo típico (lo que consume la IA)
 
@@ -70,19 +70,19 @@ curl -s -X POST localhost:8000/consulta/b1e4.../responder \
 # -> estado "resuelto", clave "01420201624"
 ```
 
-## Subir otra tablota
+## Subir otra base de datos
 
 ```bash
 curl -s -X POST localhost:8000/tablotas \
   -H "X-API-Key: $API_KEY" \
-  -F "archivo=@otra_tablota.csv" \
+  -F "archivo=@otra_base.csv" \
   -F "tablota_id=aseguradora_x"
 ```
 
 Columnas requeridas (nombres exactos, o `AÑO`/`ANIO`/`ANO`/`AGNO`/`YEAR`
 indistinto para esa columna): `CLAVE, MARCA, MODELO, DESCRIPCION, AÑO`.
 
-Luego, para consultar sobre esa tablota:
+Luego, para consultar sobre esa base de datos:
 
 ```bash
 curl -s -X POST localhost:8000/consulta \
@@ -90,7 +90,7 @@ curl -s -X POST localhost:8000/consulta \
   -d '{"modelo":"JETTA","anio":2020,"tablota_id":"aseguradora_x"}'
 ```
 
-`GET /tablotas` lista las tablotas cargadas (filas y # de grupos MODELO+AÑO).
+`GET /tablotas` lista las bases de datos cargadas (filas y # de grupos MODELO+AÑO).
 
 ## Estados de respuesta
 
@@ -111,11 +111,11 @@ el parsing de texto libre — útil para `aclaracion`, `ambiguo` o
 ## Tolerancia de formato en MODELO (`modelo_index.py`)
 
 `POST /consulta` no exige que `modelo` venga escrito exactamente como en la
-tablota. Se resuelve en este orden, cacheado por tablota:
+base de datos. Se resuelve en este orden, cacheado por base de datos:
 
 1. **Normalizado exacto** — mayúsculas, sin acentos, sin espacios/guiones.
    `"CRV"`, `"cr v"`, `"Cr.V."` → todos resuelven a `"CR-V"`.
-2. **Sublínea derivada de la propia tablota** — cuando el MODELO es
+2. **Sublínea derivada de la propia base de datos** — cuando el MODELO es
    demasiado grueso (ej. `MODELO="X"` agrupa Nissan X-Trail **y** Tesla
    Model X, `MODELO="COROLLA"` agrupa el sedán y el Corolla Cross), se puede
    escribir el nombre real: `"X-TRAIL"`, `"XTRAIL"` o `"X TRAIL"` resuelven
@@ -128,7 +128,7 @@ tablota. Se resuelve en este orden, cacheado por tablota:
    parecidos en vez de un `sin_resultado` mudo.
 
 Cada respuesta incluye `modelo_resuelto` para que quede claro a qué MODELO
-real de la tablota se mapeó el texto de entrada.
+real de la base de datos se mapeó el texto de entrada.
 
 ## Nota: MARCA mezclada bajo el mismo MODELO
 
@@ -141,8 +141,8 @@ absoluto).
 ## Probador HTML + documentación interactiva
 
 - `GET /` sirve una página de prueba (chat) en el navegador: pide base URL,
-  webkey y tablota_id, y deja hacer consultas contestando las preguntas con
-  botones o texto libre, igual que en este chat.
+  webkey e id de la base de datos, y deja hacer consultas contestando las
+  preguntas con botones o texto libre, igual que en este chat.
 - `GET /docs` — Swagger UI autogenerado por FastAPI, con botón **Authorize**
   para poner la webkey una sola vez y probar cualquier endpoint desde ahí.
 - `GET /redoc` y `GET /openapi.json` — documentación/esquema alternativos.
@@ -162,7 +162,7 @@ campos separados sino todo junto en una frase: "Volkswagen Jetta 2020",
 (quitando palabras de relleno como "quiero", "un", "cotizar") contra el
 mismo índice de MODELO de `/consulta` — incluyendo combinaciones MARCA+MODELO,
 así que "Volkswagen Jetta" o "Tesla X" también resuelven aunque el campo
-MODELO de la tablota no traiga la marca.
+MODELO de la base de datos no traiga la marca.
 
 Si encuentra año + modelo, arranca la **misma sesión** que `/consulta`
 (mismo `session_id`, se sigue con `/consulta/{id}/responder` normal). Si
@@ -247,7 +247,7 @@ resto de la API sigue funcionando normal (mismo patrón que el OCR).
 | `GHL_API_TOKEN` | Private Integration Token de GHL (Configuración → Private Integrations). Se manda como `Authorization: Bearer <token>`. |
 | `GHL_API_VERSION` | Header `Version` que exige la API de GHL. Default `2021-07-28`. |
 | `GHL_LOCATION_ID` | Opcional — el location/sub-cuenta, si tu token es a nivel agencia. |
-| `GHL_TABLOTA_ID` | Qué tablota usar para resolver los mensajes entrantes. Default `"default"`. |
+| `GHL_TABLOTA_ID` | Qué base de datos usar para resolver los mensajes entrantes. Default `"default"`. |
 | `GHL_WEBHOOK_SECRET` | Opcional pero recomendado — un secreto propio (no lo da GHL) para que nadie más pueda pegarle a `/ghl/webhook`. Se valida por `?secret=...` o header `X-GHL-Secret`. |
 
 ### 3. Configurar el workflow del lado de GHL
@@ -301,7 +301,14 @@ campos y la conversación completa antes de conectarlo de verdad.
   automáticamente (el siguiente mensaje del contacto arranca una consulta
   nueva).
 - Las respuestas se mandan en texto plano, pensadas para leerse bien en
-  WhatsApp (usa `*negritas*` de WhatsApp para la descripción final).
+  WhatsApp (usa `*negritas*` de WhatsApp para la descripción final, que
+  incluye MARCA + descripción completa).
+- Cuando hay que elegir entre varias opciones con descripciones largas
+  (`aclaracion`, `ambiguo`, `sin_match_final`), el puente las numera y el
+  cliente puede contestar solo con el número ("2") en vez de tener que
+  escribir la descripción completa. Las preguntas normales de un solo
+  atributo (trim, motor, transmisión, etc.) no se numeran porque sus
+  opciones ya son cortas.
 
 ### Limitación de WhatsApp Business (no es de este puente)
 
@@ -331,11 +338,11 @@ Medido con un servidor real (`uvicorn`, 1 worker) en el entorno de desarrollo:
 | `/consulta`, 300 requests, 30 hilos concurrentes | 46 req/s | **64.6 req/s** |
 | latencia de `/consulta` mientras corre un OCR en paralelo | avg 34ms, **max 373ms** | avg 5ms, **max 10ms** |
 
-La tablota se agrupa por `(MODELO, AÑO)` una sola vez al cargarla (`TablotaStore.grupos()`), así que cada `/consulta` ya no escanea las 28,556 filas — solo mira las pocas del grupo que le toca. El OCR de `/tarjeta-circulacion` corre en un thread aparte (`asyncio.to_thread`) para no congelar el event loop mientras procesa una imagen/PDF.
+La base de datos se agrupa por `(MODELO, AÑO)` una sola vez al cargarla (`TablotaStore.grupos()`), así que cada `/consulta` ya no escanea las 28,556 filas — solo mira las pocas del grupo que le toca. El OCR de `/tarjeta-circulacion` corre en un thread aparte (`asyncio.to_thread`) para no congelar el event loop mientras procesa una imagen/PDF.
 
 **Lo que esto SÍ soporta hoy:** un solo proceso (`uvicorn main:app`, sin `--workers`), tráfico moderado — pensado para uso interno de un equipo/agencia, no para exponerlo públicamente a alto volumen.
 
-**Lo que NO soporta todavía — correr con más de 1 worker o más de una instancia.** Las sesiones (`SESIONES` en `main.py`) y las tablotas subidas viven en un diccionario en memoria del proceso. Probado con 4 workers: 3 de 20 conversaciones se rompieron con 404 porque la pregunta se respondió en un worker distinto al que la generó. Si el tráfico esperado requiere escalar horizontalmente, hay que mover `SESIONES` (y opcionalmente las tablotas) a un almacén compartido entre procesos (Redis es la opción más simple) antes de correr con `--workers N` o detrás de un load balancer con varias instancias.
+**Lo que NO soporta todavía — correr con más de 1 worker o más de una instancia.** Las sesiones (`SESIONES` en `main.py`) y las bases de datos subidas viven en un diccionario en memoria del proceso. Probado con 4 workers: 3 de 20 conversaciones se rompieron con 404 porque la pregunta se respondió en un worker distinto al que la generó. Si el tráfico esperado requiere escalar horizontalmente, hay que mover `SESIONES` (y opcionalmente las bases de datos) a un almacén compartido entre procesos (Redis es la opción más simple) antes de correr con `--workers N` o detrás de un load balancer con varias instancias.
 
 ## Limitaciones (POC)
 
@@ -347,7 +354,7 @@ La tablota se agrupa por `(MODELO, AÑO)` una sola vez al cargarla (`TablotaStor
 - El vocabulario de familias (TRANSMISION, ALIMENTACION, etc.) es el mismo
   del `.py` original — sigue sin catalogar tokens como `IMO`, `HDS`, `TURBO`
   suelto (se cuelan en TRIM), tal como ya lo señalaba el `.md` en pendientes.
-- No hay rate limiting ni expiración de sesiones/tablotas — agregar si esto
-  sale de POC a producción.
+- No hay rate limiting ni expiración de sesiones/bases de datos — agregar si
+  esto sale de POC a producción.
 - El parser de tarjeta de circulación es heurístico y no validado contra
   documentos reales (ver sección de arriba).

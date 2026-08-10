@@ -123,6 +123,21 @@ d = r.json()
 check(d["estado"] == "sin_resultado" and "JETTA" in (d.get("sugerencias") or []),
       f"'jeta' (typo) -> sin_resultado con sugerencia JETTA (obtuvo {d.get('sugerencias')})")
 
+# --- '—' (atributo no especificado) se muestra como "No" y se acepta "no"/"ninguno" como respuesta ---
+r = client.post("/consulta", headers=H, json={"modelo":"RIO","anio":2018})
+d = r.json()
+sid = r.json()["session_id"]
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"ex"})
+d = r.json()
+check(d["pregunta"]["familia"] == "CARROCERIA" and "—" in d["pregunta"]["opciones"]
+      and "No" in d["pregunta"]["texto"] and "—" not in d["pregunta"]["texto"],
+      f"pregunta CARROCERIA muestra 'No' en el texto en vez de '—' (obtuvo {d['pregunta']['texto']!r})")
+
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"no"})
+d = r.json()
+check(d["estado"] not in ("sin_match_final",) and d.get("pregunta", {}).get("familia") != "CARROCERIA",
+      f"responder 'no' resuelve la opcion '—' (no se queda atorado en CARROCERIA) (obtuvo estado={d['estado']})")
+
 # --- regresion: MODELO reconocido pero sin filas para ese AÑO puntual ---
 # (QX50 existe en la tablota de 2019 a 2025, no en 2018 -- antes se perdia
 # el modelo_resuelto y quedaba un sin_resultado sin ninguna pista)
@@ -308,6 +323,44 @@ check(d["ok"] and d["enviado"] and len(enviados) == 2,
 check("ghl-c3" not in gb.CONVERSACIONES,
       f"sesion se limpia de CONVERSACIONES al resolverse (quedo: {gb.CONVERSACIONES.get('ghl-c3')})")
 print("   mensajes mandados a GHL:", enviados)
+
+# marca en el mensaje final de "resuelto"
+client.post("/ghl/webhook", json={"contact_id": "ghl-marca", "mensaje": "corolla 2024"})
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-marca", "mensaje": "xle"})
+d = r.json()
+check(d["ok"] and d["respuesta"].startswith("Listo, encontré tu versión:\n*TOYOTA "),
+      f"mensaje 'resuelto' de WhatsApp incluye la marca (obtuvo {d.get('respuesta')})")
+
+# opciones numeradas en 'aclaracion' -- contestar solo "2" elige la 2a opcion
+gb.CONVERSACIONES.clear()
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "corolla 2024"})
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "cross"})
+d = r.json()
+check("1. CROSS LE" in d["respuesta"] and "2. CROSS LE HEV HSD" in d["respuesta"],
+      f"'aclaracion' numera las opciones en el mensaje (obtuvo {d.get('respuesta')})")
+check(gb.CONVERSACIONES["ghl-num1"]["opciones_numeradas"] == [
+    {"tipo": "valor", "valor": "CROSS LE"},
+    {"tipo": "valor", "valor": "CROSS LE HEV HSD"},
+    {"tipo": "valor", "valor": "CROSS XLE"},
+], f"mapeo numero->valor guardado correcto (obtuvo {gb.CONVERSACIONES['ghl-num1']['opciones_numeradas']})")
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "2"})
+d = r.json()
+check(d["ok"] and "CROSS LE HEV" in d["respuesta"] and "ghl-num1" not in gb.CONVERSACIONES,
+      f"responder '2' resuelve directo a la 2a opcion (obtuvo {d.get('respuesta')})")
+
+# opciones numeradas en 'sin_match_final' -- mismo mecanismo pero con clave
+gb.CONVERSACIONES.clear()
+client.post("/ghl/webhook", json={"contact_id": "ghl-num2", "mensaje": "jetta 2020"})
+client.post("/ghl/webhook", json={"contact_id": "ghl-num2", "mensaje": "asdasdasd"})
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-num2", "mensaje": "zxzxzxzx"})
+d = r.json()
+check(d["respuesta"].startswith("No reconocí tu respuesta") and "1. " in d["respuesta"],
+      f"'sin_match_final' numera las opciones (obtuvo {d.get('respuesta')})")
+numeradas = gb.CONVERSACIONES["ghl-num2"]["opciones_numeradas"]
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-num2", "mensaje": "1"})
+d = r.json()
+check(d["ok"] and numeradas[0]["clave"] in d["respuesta"] and "ghl-num2" not in gb.CONVERSACIONES,
+      f"responder '1' resuelve directo a la clave de la 1a opcion (obtuvo {d.get('respuesta')})")
 
 # "reiniciar" limpia la sesion aunque haya una pregunta pendiente
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-c4", "mensaje": "jetta 2020"})

@@ -40,6 +40,11 @@ ALIAS: Dict[str, Dict[str, set]] = {
     },
 }
 
+# Respuestas que cuentan como "no" cuando la opcion "—" (atributo no
+# especificado, mostrado como "No") esta disponible -- ya normalizadas
+# (mayusculas, sin acentos/puntuacion) para comparar directo contra resp_n.
+_NEGACIONES = {"NO", "NINGUNO", "NINGUNA", "NA", "N A", "NADA", "NO APLICA"}
+
 PLANTILLAS = {
     "MARCA": "¿De qué marca es? Por ejemplo: {ej}.",
     "TRIM": "¿Qué versión es? Por ejemplo: {ej}.",
@@ -207,8 +212,26 @@ def resolver_candidatas(grupos: dict, indice, modelo: str, anio: str) -> dict:
     return {"tipo": "sin_resultado", "sugerencias": []}
 
 
+def _mostrar(v: str) -> str:
+    """Texto para mostrarle a un humano en vez del valor crudo. '—' es el
+    placeholder que usa desc_discriminator cuando ese atributo no aparece en
+    la DESCRIPCION (ej. carroceria sin 'HB' explicito) -- mostrarlo como
+    'No' es mucho mas claro que un guion suelto en una pregunta de chat."""
+    return "No" if v == "—" else v
+
+
 def _ejemplos(valores, n=4):
-    return sorted(valores)[:n]
+    return [_mostrar(v) for v in sorted(valores)[:n]]
+
+
+def _unir_ejemplos(valores) -> str:
+    """Junta los ejemplos para el texto de la pregunta. Con exactamente 2
+    (el caso tipico de un atributo binario tipo "HB" vs "no especificado")
+    se lee mejor con "o" que con coma."""
+    ejemplos = _ejemplos(valores)
+    if len(ejemplos) == 2:
+        return " o ".join(ejemplos)
+    return ", ".join(ejemplos)
 
 
 def valor_familia(c: dict, familia: str) -> str:
@@ -243,7 +266,7 @@ def siguiente_paso(candidatas: List[dict]) -> Tuple[str, Optional[object]]:
         opciones = sorted(marcas)
         pregunta = {
             "familia": "MARCA",
-            "texto": PLANTILLAS["MARCA"].format(ej=", ".join(_ejemplos(opciones))),
+            "texto": PLANTILLAS["MARCA"].format(ej=_unir_ejemplos(opciones)),
             "opciones": opciones,
         }
         return "pregunta", pregunta
@@ -258,7 +281,7 @@ def siguiente_paso(candidatas: List[dict]) -> Tuple[str, Optional[object]]:
     plantilla = PLANTILLAS.get(familia, "¿Cuál es el valor de " + familia + "? Por ejemplo: {ej}.")
     pregunta = {
         "familia": familia,
-        "texto": plantilla.format(ej=", ".join(_ejemplos(opciones))),
+        "texto": plantilla.format(ej=_unir_ejemplos(opciones)),
         "opciones": opciones,
     }
     return "pregunta", pregunta
@@ -275,6 +298,14 @@ def interpretar_respuesta(respuesta: str, familia: str, opciones: List[str]) -> 
     resp_n = normalizar(respuesta)
     if not resp_n:
         return "sin_match", []
+
+    # 0. "—" es el placeholder de "este atributo no aparece en la
+    # DESCRIPCION" (se muestra como "No" en la pregunta, ver _mostrar) -- si
+    # esa opcion esta disponible y la respuesta es una negacion tipica, se
+    # resuelve directo a ella sin pasar por el match exacto/parcial de abajo
+    # (que fallaria porque "—" no tiene texto real para matchear).
+    if "—" in opciones and resp_n in _NEGACIONES:
+        return "resuelto", ["—"]
 
     # 1. match exacto normalizado
     exactos = [op for op in opciones if normalizar(op) == resp_n]
