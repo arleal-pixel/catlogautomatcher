@@ -231,14 +231,14 @@ WhatsApp → GHL → workflow "Customer Replied" → acción "Webhook"
         → API de Conversaciones de GHL (Send a new message) → WhatsApp
 ```
 
-### 1. Instalar la dependencia opcional
+### 1. Dependencia (httpx)
 
-```bash
-pip install -r requirements-ghl.txt   # solo agrega httpx
-```
-
-Sin esto instalado, `/ghl/webhook` responde `501` pero el resto de la API
-sigue funcionando normal (mismo patrón que el OCR).
+`httpx` ya viene en `requirements.txt` (necesario para que plataformas como
+Railway, que instalan ese archivo automáticamente, activen `/ghl/webhook`
+sin pasos extra). `requirements-ghl.txt` queda solo como referencia de la
+versión mínima que necesita esta funcionalidad en particular. Si por algún
+motivo `httpx` no está instalado, `/ghl/webhook` responde `501` pero el
+resto de la API sigue funcionando normal (mismo patrón que el OCR).
 
 ### 2. Variables de entorno
 

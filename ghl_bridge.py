@@ -105,6 +105,9 @@ def _formatear_respuesta(resultado, aviso: Optional[str] = None) -> str:
                 "una de estas opciones:\n" + "\n".join(lineas))
 
     if estado == "sin_resultado":
+        if resultado.modelo_resuelto:
+            return (f"Encontré el modelo *{resultado.modelo_resuelto}*, pero no tengo versiones para "
+                    f"ese año en la tablota. ¿Me confirmas el año o me das otro modelo?")
         if resultado.sugerencias:
             return f"No encontré ese modelo. ¿Quisiste decir: {', '.join(resultado.sugerencias)}?"
         return "No encontré ese modelo/año en la tablota. ¿Me das marca, modelo y año?"

@@ -270,6 +270,24 @@ def probador():
     return FileResponse(index)
 
 
+@app.get("/tablotas/_debug", dependencies=[Depends(verificar_api_key)])
+def debug_tablotas_dir():
+    """Diagnostico: donde esta buscando/guardando CSVs este proceso ahora
+    mismo, y que archivos .csv ve realmente en disco en ese momento -- util
+    para confirmar que un Volume de Railway (u otro host) esta montado en la
+    ruta correcta. Compara `tablotas_dir` contra el mount path que
+    configuraste en el panel de Railway."""
+    from tablota_store import DATA_DIR
+    dir_resuelto = DATA_DIR.resolve()
+    return {
+        "tablotas_dir": str(dir_resuelto),
+        "existe_en_disco": dir_resuelto.exists(),
+        "archivos_csv_en_disco": sorted(p.name for p in dir_resuelto.glob("*.csv")) if dir_resuelto.exists() else [],
+        "tablota_ids_en_memoria": sorted(store.listar().keys()),
+        "TABLOTAS_DIR_env": os.environ.get("TABLOTAS_DIR") or "(no definida -- usa el default relativo al codigo)",
+    }
+
+
 @app.post("/tablotas", response_model=TablotaOut, dependencies=[Depends(verificar_api_key)])
 async def subir_tablota(archivo: UploadFile = File(...), tablota_id: Optional[str] = Form(None)):
     """Sube una tablota CSV nueva (columnas requeridas: CLAVE, MARCA, MODELO,
@@ -361,7 +379,13 @@ def iniciar_consulta(body: ConsultaIn):
 
     candidatas = resultado["candidatas"]
     if not candidatas:
-        return ResultadoOut(session_id=None, estado="sin_resultado", candidatas_restantes=0)
+        # El MODELO se reconocio bien (ej. "QX50" existe en la tablota) pero
+        # no hay filas para ese AÑO puntual -- se manda modelo_resuelto para
+        # que quede claro que el problema es el año, no que no se reconocio
+        # el modelo (antes se perdia este dato y quedaba un sin_resultado
+        # sin ninguna pista).
+        return ResultadoOut(session_id=None, estado="sin_resultado", candidatas_restantes=0,
+                             modelo_resuelto=resultado.get("modelo_resuelto"))
 
     sid = _nueva_sesion(body.tablota_id, body.modelo, body.anio, candidatas,
                          modelo_resuelto=resultado["modelo_resuelto"])
@@ -400,10 +424,16 @@ def _procesar_texto_libre(texto: str, tablota_id: str) -> InterpretarOut:
     candidatas = resultado.get("candidatas") or []
 
     if resultado["tipo"] == "sin_resultado" or not candidatas:
+        # mismo caso que en /consulta: si el MODELO se reconocio pero no hay
+        # filas para ese AÑO, se manda modelo_resuelto para que quede claro
+        # que el año es el problema, no el modelo.
+        modelo_resuelto = resultado.get("modelo_resuelto") if resultado["tipo"] == "ok" else None
         return InterpretarOut(
-            texto_original=texto, anio_detectado=anio, modelo_detectado=modelo_texto,
+            texto_original=texto, anio_detectado=anio,
+            modelo_detectado=modelo_resuelto or modelo_texto,
             tokens_sobrantes=extraccion["tokens_sobrantes"] or None,
-            resultado=ResultadoOut(estado="sin_resultado", sugerencias=resultado.get("sugerencias") or None),
+            resultado=ResultadoOut(estado="sin_resultado", modelo_resuelto=modelo_resuelto,
+                                    sugerencias=resultado.get("sugerencias") or None),
         )
 
     sid = _nueva_sesion(tablota_id, modelo_texto, anio, candidatas,

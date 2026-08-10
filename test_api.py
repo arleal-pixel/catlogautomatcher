@@ -123,6 +123,19 @@ d = r.json()
 check(d["estado"] == "sin_resultado" and "JETTA" in (d.get("sugerencias") or []),
       f"'jeta' (typo) -> sin_resultado con sugerencia JETTA (obtuvo {d.get('sugerencias')})")
 
+# --- regresion: MODELO reconocido pero sin filas para ese AÑO puntual ---
+# (QX50 existe en la tablota de 2019 a 2025, no en 2018 -- antes se perdia
+# el modelo_resuelto y quedaba un sin_resultado sin ninguna pista)
+r = client.post("/consulta", headers=H, json={"modelo":"QX50","anio":2018})
+d = r.json()
+check(d["estado"] == "sin_resultado" and d["modelo_resuelto"] == "QX50",
+      f"QX50 2018 (modelo existe, año no) -> sin_resultado CON modelo_resuelto (obtuvo {d.get('modelo_resuelto')})")
+
+r = client.post("/interpretar", headers=H, json={"texto":"qx50 2018"})
+d = r.json()
+check(d["resultado"]["estado"] == "sin_resultado" and d["resultado"]["modelo_resuelto"] == "QX50",
+      f"/interpretar 'qx50 2018' -> mismo caso, modelo_resuelto presente (obtuvo {d['resultado'].get('modelo_resuelto')})")
+
 # --- subir otra tablota (subset del CSV real) y consultar sobre ella ---
 import csv, io
 rows = list(csv.DictReader(open("data/tablotas/default.csv", encoding="utf-8-sig")))
