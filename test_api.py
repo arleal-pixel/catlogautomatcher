@@ -185,6 +185,16 @@ d = r.json()
 check(d.get("sugerencias") == ["JETTA"],
       f"'jeta 2020' (typo) -> sugiere JETTA (obtuvo {d.get('sugerencias')})")
 
+# --- regresion: acentos en /interpretar no deben partir el token del MODELO ---
+# ("Río" se tokenizaba como "R"+"O" porque la í no es A-Z ascii y el regex
+# viejo la trataba como separador -- nunca resolvia aunque "RIO" existiera)
+r = client.post("/interpretar", headers=H, json={"texto": "Río 2018"})
+d = r.json()
+check(d["modelo_detectado"] == "RIO" and d["resultado"]["estado"] == "pregunta"
+      and d["resultado"]["candidatas_restantes"] == 12,
+      f"'Río 2018' (con acento) -> resuelve a RIO, 12 candidatas (obtuvo {d.get('modelo_detectado')}, "
+      f"{d.get('resultado',{}).get('estado')}, {d.get('resultado',{}).get('candidatas_restantes')})")
+
 # --- probador HTML + docs ---
 r = client.get("/")
 check(r.status_code == 200 and "text/html" in r.headers.get("content-type", ""), "GET / sirve el probador HTML")

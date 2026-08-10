@@ -81,14 +81,18 @@ def extraer_de_texto(texto: str, indice) -> dict:
               "tokens_usados": [...], "tokens_sobrantes": [...],
               "sugerencias": [...]}.
     """
-    texto_up = (texto or "").upper()
+    # normalizar() ya quita acentos y convierte cualquier separador (guion,
+    # puntuacion, etc.) en espacio -- sin esto, "Río" se partia en tokens
+    # "R" y "O" (la í se trataba como separador al no ser A-Z ascii), y
+    # nunca matcheaba directo contra el indice aunque "RIO" si existiera.
+    texto_up = normalizar(texto)
     anio = None
     m = _ANIO_LIBRE_RE.search(texto_up)
     if m:
         anio = m.group(0)
         texto_up = texto_up[:m.start()] + " " + texto_up[m.end():]
 
-    tokens = [t for t in re.split(r"[^A-Z0-9]+", texto_up) if t and t not in _STOPWORDS_LIBRE]
+    tokens = [t for t in texto_up.split() if t and t not in _STOPWORDS_LIBRE]
 
     modelo_texto = None
     tokens_usados: List[str] = []
