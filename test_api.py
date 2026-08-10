@@ -1,0 +1,298 @@
+import os
+os.environ["API_KEY"] = "test-key-123"
+
+from fastapi.testclient import TestClient
+from main import app
+
+client = TestClient(app)
+H = {"X-API-Key": "test-key-123"}
+
+def check(cond, msg):
+    status = "OK " if cond else "FAIL"
+    print(f"[{status}] {msg}")
+    assert cond, msg
+
+# --- health sin auth ---
+r = client.get("/health")
+check(r.status_code == 200, "GET /health sin auth responde 200")
+
+# --- auth requerida ---
+r = client.post("/consulta", json={"modelo":"JETTA","anio":2020})
+check(r.status_code == 401, "POST /consulta sin API key -> 401")
+
+# --- listar tablotas (default precargada) ---
+r = client.get("/tablotas", headers=H)
+check(r.status_code == 200, "GET /tablotas 200")
+data = r.json()
+check("default" in data, "tablota 'default' precargada")
+print("   tablotas:", data)
+
+# --- JETTA 2020: 9 candidatas -> TRIM 'comfortline' -> TRANSMISION 'automatica' -> 01420201624 ---
+r = client.post("/consulta", headers=H, json={"modelo":"JETTA","anio":2020})
+d = r.json()
+check(d["estado"] == "pregunta" and d["candidatas_restantes"] == 9, "JETTA 2020: 9 candidatas, pregunta TRIM")
+check(d["pregunta"]["familia"] == "TRIM", "primera pregunta es TRIM")
+sid = d["session_id"]
+
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"comfortline"})
+d = r.json()
+check(d["estado"] == "pregunta" and d["pregunta"]["familia"] == "TRANSMISION", "tras 'comfortline' pregunta TRANSMISION")
+
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"automatica"})
+d = r.json()
+check(d["estado"] == "resuelto" and d["clave"] == "01420201624", f"JETTA 2020 comfortline+automatica -> 01420201624 (obtuvo {d.get('clave')})")
+print("   ->", d["clave"], d["descripcion"])
+
+# --- COROLLA 2024: 'xle' matchea EXACTO (hay opcion 'XLE') -> resuelve directo ---
+r = client.post("/consulta", headers=H, json={"modelo":"COROLLA","anio":2024})
+d = r.json()
+sid = d["session_id"]
+check(d["pregunta"]["familia"] == "TRIM", "COROLLA 2024 pregunta TRIM")
+
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"xle"})
+d = r.json()
+check(d["estado"] == "resuelto" and d["clave"] == "01400100509", f"'xle' matchea exacto -> resuelve directo 01400100509 (obtuvo {d.get('clave')})")
+print("   ->", d["clave"], d["descripcion"])
+
+# --- COROLLA 2024: 'cross' no matchea exacto, matchea 3 parcial -> aclaracion ---
+r = client.post("/consulta", headers=H, json={"modelo":"COROLLA","anio":2024})
+d = r.json()
+sid = d["session_id"]
+
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"cross"})
+d = r.json()
+check(d["estado"] == "aclaracion" and len(d["valores_posibles"]) == 3, f"'cross' ambiguo con 3 valores (obtuvo {d.get('valores_posibles')})")
+print("   valores_posibles:", d["valores_posibles"])
+
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"valor":"CROSS XLE"})
+d = r.json()
+check(d["estado"] == "resuelto" and d["clave"] == "01400102802", f"valor exacto 'CROSS XLE' -> 01400102802 (obtuvo {d.get('clave')})")
+print("   ->", d["clave"], d["descripcion"])
+
+# --- MODELO=X, AÑO=2021: debe preguntar MARCA primero (Nissan X-Trail + Tesla Model X) ---
+r = client.post("/consulta", headers=H, json={"modelo":"X","anio":2021})
+d = r.json()
+check(d["estado"] == "pregunta" and d["pregunta"]["familia"] == "MARCA", f"MODELO=X AÑO=2021 pregunta MARCA primero (obtuvo {d['pregunta']['familia'] if d.get('pregunta') else d['estado']})")
+print("   opciones marca:", d["pregunta"]["opciones"])
+sid = d["session_id"]
+
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"nissan"})
+d = r.json()
+check(d["estado"] == "pregunta", "tras 'nissan' sigue preguntando (TRIM, dentro de los 7 X-Trail)")
+print("   siguiente pregunta:", d["pregunta"]["familia"], d["pregunta"]["opciones"])
+
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"sense"})
+d = r.json()
+print("   tras 'sense':", d["estado"], d.get("valores_posibles") or d.get("clave"))
+
+# --- sin_resultado ---
+r = client.post("/consulta", headers=H, json={"modelo":"MODELO_QUE_NO_EXISTE","anio":1999})
+d = r.json()
+check(d["estado"] == "sin_resultado", "modelo inexistente -> sin_resultado")
+
+# --- indice de MODELO: tolerancia de formato ---
+for variante in ["CRV", "cr v", "Cr.V."]:
+    r = client.post("/consulta", headers=H, json={"modelo":variante,"anio":2025})
+    d = r.json()
+    check(d["estado"] == "pregunta" and d["candidatas_restantes"] == 4 and d["modelo_resuelto"] == "CR-V",
+          f"'{variante}' -> resuelve a CR-V, 4 candidatas (obtuvo {d.get('modelo_resuelto')}, {d.get('candidatas_restantes')})")
+
+# --- indice de MODELO: sublinea (evita mezclar Nissan X-Trail con Tesla Model X) ---
+for variante in ["X-TRAIL", "XTRAIL", "x trail"]:
+    r = client.post("/consulta", headers=H, json={"modelo":variante,"anio":2021})
+    d = r.json()
+    check(d["estado"] == "pregunta" and d["candidatas_restantes"] == 7 and d["modelo_resuelto"] == "X TRAIL",
+          f"'{variante}' -> resuelve a X TRAIL, 7 candidatas sin Tesla (obtuvo {d.get('candidatas_restantes')})")
+
+# --- indice de MODELO: sublinea narrows directo a Corolla Cross (3, no 9) ---
+r = client.post("/consulta", headers=H, json={"modelo":"COROLLA CROSS","anio":2024})
+d = r.json()
+check(d["estado"] == "pregunta" and d["candidatas_restantes"] == 3,
+      f"'COROLLA CROSS' -> 3 candidatas directo (obtuvo {d.get('candidatas_restantes')})")
+
+# --- indice de MODELO: MARCA+MODELO concatenados (MG5 = MARCA "MG" + MODELO "5") ---
+for variante in ["mg5", "MG 5", "mg-5"]:
+    r = client.post("/consulta", headers=H, json={"modelo":variante,"anio":2024})
+    d = r.json()
+    check(d["estado"] == "pregunta" and d["candidatas_restantes"] == 4 and d["modelo_resuelto"] == "MG 5",
+          f"'{variante}' -> resuelve a MG 5, 4 candidatas (obtuvo {d.get('modelo_resuelto')}, {d.get('candidatas_restantes')})")
+
+# --- indice de MODELO: typos devuelven sugerencias en vez de fallar mudo ---
+r = client.post("/consulta", headers=H, json={"modelo":"jeta","anio":2020})
+d = r.json()
+check(d["estado"] == "sin_resultado" and "JETTA" in (d.get("sugerencias") or []),
+      f"'jeta' (typo) -> sin_resultado con sugerencia JETTA (obtuvo {d.get('sugerencias')})")
+
+# --- subir otra tablota (subset del CSV real) y consultar sobre ella ---
+import csv, io
+rows = list(csv.DictReader(open("data/tablotas/default.csv", encoding="utf-8-sig")))
+subset = [r for r in rows if r["MODELO"].strip().upper()=="MDX" and r["AÑO"]=="2019"]
+buf = io.StringIO()
+w = csv.DictWriter(buf, fieldnames=rows[0].keys())
+w.writeheader()
+for r in subset: w.writerow(r)
+csv_bytes = buf.getvalue().encode("utf-8")
+
+r = client.post("/tablotas", headers=H, files={"archivo": ("mini.csv", csv_bytes, "text/csv")}, data={"tablota_id":"mini_test"})
+check(r.status_code == 200, f"subir tablota nueva 200 (obtuvo {r.status_code}: {r.text[:200]})")
+print("   tablota subida:", r.json())
+
+r = client.post("/consulta", headers=H, json={"modelo":"MDX","anio":2019,"tablota_id":"mini_test"})
+d = r.json()
+check(d["estado"] == "pregunta" and d["candidatas_restantes"] == 2, "consulta sobre tablota subida funciona (2 candidatas MDX 2019)")
+
+# --- /interpretar: extraer MARCA/MODELO/AÑO de texto libre ---
+r = client.post("/interpretar", headers=H, json={"texto": "Volkswagen Jetta 2020"})
+d = r.json()
+check(d["anio_detectado"] == "2020" and d["resultado"]["candidatas_restantes"] == 9,
+      f"'Volkswagen Jetta 2020' -> anio=2020, 9 candidatas (obtuvo {d.get('anio_detectado')}, {d.get('resultado',{}).get('candidatas_restantes')})")
+
+r = client.post("/interpretar", headers=H, json={"texto": "quiero un corolla cross 2024"})
+d = r.json()
+check(d["anio_detectado"] == "2024" and d["resultado"]["candidatas_restantes"] == 3,
+      f"'quiero un corolla cross 2024' -> 3 candidatas (obtuvo {d.get('resultado',{}).get('candidatas_restantes')})")
+
+r = client.post("/interpretar", headers=H, json={"texto": "Nissan X-Trail 2021"})
+d = r.json()
+check(d["anio_detectado"] == "2021" and d["resultado"]["candidatas_restantes"] == 7,
+      f"'Nissan X-Trail 2021' -> 7 candidatas, sin Tesla (obtuvo {d.get('resultado',{}).get('candidatas_restantes')})")
+
+r = client.post("/interpretar", headers=H, json={"texto": "un mg5 2024 porfa"})
+d = r.json()
+check(d["anio_detectado"] == "2024" and d["modelo_detectado"] == "MG 5",
+      f"'un mg5 2024 porfa' -> modelo MG 5 (obtuvo {d.get('modelo_detectado')})")
+
+r = client.post("/interpretar", headers=H, json={"texto": "necesito cotizar un jetta"})
+d = r.json()
+check(d["anio_detectado"] is None and "año" in d["aviso"],
+      f"'necesito cotizar un jetta' (sin año) -> aviso pide año (obtuvo {d.get('aviso')})")
+
+r = client.post("/interpretar", headers=H, json={"texto": "jeta 2020"})
+d = r.json()
+check(d.get("sugerencias") == ["JETTA"],
+      f"'jeta 2020' (typo) -> sugiere JETTA (obtuvo {d.get('sugerencias')})")
+
+# --- probador HTML + docs ---
+r = client.get("/")
+check(r.status_code == 200 and "text/html" in r.headers.get("content-type", ""), "GET / sirve el probador HTML")
+
+r = client.get("/docs")
+check(r.status_code == 200, "GET /docs (Swagger) 200")
+
+r = client.get("/openapi.json")
+d = r.json()
+check("APIKeyHeader" in d.get("components", {}).get("securitySchemes", {}),
+      "OpenAPI declara el esquema de auth X-API-Key")
+
+# --- OCR de tarjeta de circulacion (con tarjeta sintetica generada por PIL) ---
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+    font_s = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+    img = Image.new("RGB", (900, 500), "white")
+    dr = ImageDraw.Draw(img)
+    dr.text((40, 20), "TARJETA DE CIRCULACION", font=font, fill="black")
+    for i, (label, val) in enumerate([
+        ("MARCA:", "HONDA"), ("SUBMARCA:", "CR-V"), ("VERSION:", "TOURING"),
+        ("MODELO:", "2024"), ("NUM DE SERIE:", "5FNRL6H99RB012345"),
+    ]):
+        dr.text((40, 100 + i * 50), label, font=font_s, fill="black")
+        dr.text((320, 100 + i * 50), val, font=font_s, fill="black")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    r = client.post("/tarjeta-circulacion", headers=H,
+                     files={"archivo": ("mock.png", buf, "image/png")})
+    d = r.json()
+    ok = (r.status_code == 200 and d["campos_extraidos"]["marca"] == "HONDA"
+          and d["campos_extraidos"]["modelo_linea"] == "CR-V"
+          and d["campos_extraidos"]["anio"] == "2024"
+          and d["campos_extraidos"]["niv"] == "5FNRL6H99RB012345")
+    check(ok, f"OCR tarjeta sintetica -> MARCA/MODELO/AÑO/NIV correctos (obtuvo {d['campos_extraidos']})")
+    check(d.get("candidatas_sugeridas") is not None
+          and d["candidatas_sugeridas"]["modelo_resuelto"] == "CR-V",
+          "OCR encadena a resolver_candidatas y sugiere las CR-V 2024")
+except ImportError as e:
+    print(f"[SKIP] prueba de OCR (falta dependencia: {e})")
+
+# --- regresion: mejor_pregunta debe ser deterministico entre PROCESOS ---
+# (un set() sin sorted() en desempates depende del hash randomization de
+# Python, que varia por proceso -- hay que probarlo lanzando procesos
+# nuevos, no solo repitiendo dentro del mismo interprete)
+import subprocess, sys
+snippet = (
+    "import os,json;"
+    "os.environ['API_KEY']='k';"
+    "from fastapi.testclient import TestClient;"
+    "from main import app;"
+    "c=TestClient(app);"
+    "r=c.post('/consulta',headers={'X-API-Key':'k'},json={'modelo':'mg5','anio':2024});"
+    "print(r.json()['pregunta']['familia'])"
+)
+familias_vistas = set()
+for _ in range(8):
+    out = subprocess.run([sys.executable, "-c", snippet], capture_output=True, text=True, cwd=".")
+    familias_vistas.add(out.stdout.strip())
+check(len(familias_vistas) == 1,
+      f"mejor_pregunta determinista entre procesos distintos (vistas: {familias_vistas})")
+
+# --- puente GoHighLevel (/ghl/webhook) ---
+import ghl_bridge as gb
+
+# dry_run: procesa pero no manda nada a GHL (no requiere GHL_API_TOKEN)
+gb.CONVERSACIONES.clear()
+r = client.post("/ghl/webhook?dry_run=true", json={
+    "contact_id": "ghl-c1", "telefono": "+525500000000", "mensaje": "Nissan Jetta 2018",
+})
+d = r.json()
+check(r.status_code == 200 and d["ok"] and d["enviado"] is False and d["respuesta"],
+      f"/ghl/webhook dry_run procesa sin mandar a GHL (obtuvo {d})")
+print("   respuesta calculada:", d["respuesta"])
+
+# campos faltantes -> ok=False con error explicativo, no 500
+r = client.post("/ghl/webhook?dry_run=true", json={"contact_id": "ghl-c2"})
+d = r.json()
+check(r.status_code == 200 and d["ok"] is False and "mensaje" in d["error"] or "campo" in d["error"].lower(),
+      f"/ghl/webhook sin 'mensaje' -> ok=False con error claro (obtuvo {d})")
+
+# secret: si GHL_WEBHOOK_SECRET esta definido, hay que mandarlo
+os.environ["GHL_WEBHOOK_SECRET"] = "shh"
+r = client.post("/ghl/webhook?dry_run=true", json={"contact_id": "x", "mensaje": "jetta 2020"})
+check(r.status_code == 401, f"/ghl/webhook sin secret -> 401 cuando GHL_WEBHOOK_SECRET esta definido (obtuvo {r.status_code})")
+r = client.post("/ghl/webhook?dry_run=true&secret=shh", json={"contact_id": "x", "mensaje": "jetta 2020"})
+check(r.status_code == 200, f"/ghl/webhook con ?secret= correcto -> 200 (obtuvo {r.status_code})")
+del os.environ["GHL_WEBHOOK_SECRET"]
+
+# flujo completo multi-turno por WhatsApp, con envio real "mockeado" (sin llamar a GHL de verdad)
+enviados = []
+def _mock_enviar(contact_id, texto, conversation_id=None):
+    enviados.append((contact_id, texto, conversation_id))
+    return {"id": "msg_mock"}
+gb.enviar_whatsapp = _mock_enviar
+gb.CONVERSACIONES.clear()
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "corolla cross 2024"})
+d = r.json()
+check(d["ok"] and d["enviado"] and len(enviados) == 1 and enviados[-1][0] == "ghl-c3",
+      f"/ghl/webhook (sin dry_run) llama a enviar_whatsapp con el contact_id correcto (obtuvo {d}, enviados={enviados})")
+check("ghl-c3" in gb.CONVERSACIONES, "queda sesion viva mapeada al contact_id tras una pregunta pendiente")
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "xle"})
+d = r.json()
+check(d["ok"] and d["enviado"] and len(enviados) == 2,
+      f"segundo mensaje del mismo contact_id continua la MISMA sesion (obtuvo {d})")
+check("ghl-c3" not in gb.CONVERSACIONES,
+      f"sesion se limpia de CONVERSACIONES al resolverse (quedo: {gb.CONVERSACIONES.get('ghl-c3')})")
+print("   mensajes mandados a GHL:", enviados)
+
+# "reiniciar" limpia la sesion aunque haya una pregunta pendiente
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c4", "mensaje": "jetta 2020"})
+check("ghl-c4" in gb.CONVERSACIONES, "sesion viva para ghl-c4 tras primer mensaje")
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c4", "mensaje": "reiniciar"})
+d = r.json()
+check(d["ok"] and "ghl-c4" not in gb.CONVERSACIONES,
+      f"'reiniciar' limpia la sesion (obtuvo {d}, quedo={gb.CONVERSACIONES.get('ghl-c4')})")
+
+print()
+print("=== TODO OK ===")

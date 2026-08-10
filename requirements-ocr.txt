@@ -1,0 +1,14 @@
+# Dependencias EXTRA (opcionales) para /tarjeta-circulacion.
+# Instalar solo si se va a usar ese endpoint: pip install -r requirements-ocr.txt
+pytesseract>=0.3.10
+pdf2image>=1.17
+Pillow>=10
+
+# Ademas de estos paquetes de Python, el SERVIDOR necesita tener instalados:
+#   - el binario 'tesseract' (Debian/Ubuntu: apt-get install tesseract-ocr)
+#   - poppler-utils, para leer PDFs (Debian/Ubuntu: apt-get install poppler-utils)
+#   - opcional pero recomendado: el paquete de idioma español de tesseract
+#     (apt-get install tesseract-ocr-spa) y luego definir la env var
+#     OCR_LANG=spa+eng -- sin esto, el OCR corre en ingles, que en general
+#     funciona para los campos (son mayusculas sin acentos) pero es menos
+#     preciso con nombres/valores que sí llevan acentos o "ñ".

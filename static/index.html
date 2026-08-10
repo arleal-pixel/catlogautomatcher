@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probador — Selector de descripción</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2a2f3a;
+    --text:#e8eaed; --muted:#9aa3b2; --accent:#4f8cff; --accent2:#2fbf71;
+    --warn:#e6b400; --err:#e0525c;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--text);
+  }
+  header{padding:20px 24px; border-bottom:1px solid var(--border)}
+  header h1{margin:0 0 4px; font-size:18px}
+  header p{margin:0; color:var(--muted); font-size:13px}
+  header a{color:var(--accent)}
+  .wrap{max-width:960px; margin:0 auto; padding:20px 16px 60px; display:grid; gap:16px; grid-template-columns:1fr}
+  @media(min-width:860px){ .wrap{grid-template-columns: 340px 1fr} }
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px}
+  .card h2{margin:0 0 12px; font-size:14px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em}
+  label{display:block; font-size:12px; color:var(--muted); margin:10px 0 4px}
+  input[type=text],input[type=password],input[type=number],select{
+    width:100%; padding:9px 10px; background:var(--panel2); border:1px solid var(--border);
+    color:var(--text); border-radius:8px; font-size:14px;
+  }
+  input[type=file]{width:100%; font-size:13px; color:var(--muted)}
+  button{
+    cursor:pointer; border:none; border-radius:8px; padding:9px 14px; font-size:14px;
+    background:var(--accent); color:#fff; font-weight:600;
+  }
+  button.secondary{background:var(--panel2); border:1px solid var(--border); color:var(--text)}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  .row{display:flex; gap:8px}
+  .row > *{flex:1}
+  .check-row{display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12px; color:var(--muted)}
+  .check-row input{width:auto}
+  .msgs{display:flex; flex-direction:column; gap:10px; min-height:120px}
+  .bubble{padding:10px 12px; border-radius:10px; font-size:14px; line-height:1.4; max-width:100%}
+  .bubble.bot{background:var(--panel2); border:1px solid var(--border)}
+  .bubble.user{background:#22314f; border:1px solid #2f4370; align-self:flex-end}
+  .bubble.ok{background:#123a25; border:1px solid #1e5c3a}
+  .bubble.warn{background:#3a2f0d; border:1px solid #5c4b12}
+  .bubble.err{background:#3a1518; border:1px solid #5c2229}
+  .bubble small{display:block; color:var(--muted); margin-top:6px; font-size:11px}
+  .opciones{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px}
+  .opciones button{background:var(--panel2); border:1px solid var(--border); color:var(--text); font-weight:500; font-size:13px; padding:6px 10px}
+  .opciones button:hover{border-color:var(--accent)}
+  .clave{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:15px; font-weight:700; color:var(--accent2)}
+  .estado-pill{display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; background:var(--panel2); color:var(--muted); margin-bottom:6px}
+  .foot{color:var(--muted); font-size:12px; margin-top:10px}
+  .divider{border-top:1px solid var(--border); margin:14px 0}
+  #respuestaForm{display:flex; gap:8px; margin-top:14px}
+  #respuestaForm input{flex:1}
+
+  /* --- bloque "llamada a la API" --- */
+  details.llamada{margin-top:10px; border-top:1px dashed var(--border); padding-top:8px}
+  details.llamada summary{
+    cursor:pointer; font-size:11px; color:var(--muted); font-family:ui-monospace,Menlo,Consolas,monospace;
+    list-style:none; display:flex; align-items:center; gap:6px;
+  }
+  details.llamada summary::-webkit-details-marker{display:none}
+  details.llamada summary::before{content:"▸"; display:inline-block; transition:transform .15s}
+  details.llamada[open] summary::before{transform:rotate(90deg)}
+  .llamada-body{margin-top:8px}
+  .llamada-label{font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:8px 0 4px}
+  .llamada pre{
+    background:#0b0d12; border:1px solid var(--border); border-radius:8px; padding:10px;
+    font-size:12px; line-height:1.45; overflow-x:auto; white-space:pre-wrap; word-break:break-word;
+    font-family:ui-monospace,Menlo,Consolas,monospace; color:#c9d1d9; margin:0;
+  }
+  .llamada-copy{margin-top:8px; font-size:12px; padding:6px 10px}
+  .llamada-copy.copiado{background:var(--accent2)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Probador — Selector de descripción (MODELO, AÑO) → CLAVE</h1>
+  <p>Conecta contra la API de FastAPI. Docs interactivas (Swagger) en <a href="/docs" target="_blank">/docs</a> · esquema en <a href="/openapi.json" target="_blank">/openapi.json</a></p>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Conexión</h2>
+    <label>Base URL</label>
+    <input id="baseUrl" type="text" value="">
+    <label>X-API-Key (webkey)</label>
+    <input id="apiKey" type="password" placeholder="tu webkey">
+    <label>Tablota</label>
+    <input id="tablotaId" type="text" value="default">
+    <div class="check-row">
+      <input id="mostrarLlamadas" type="checkbox" checked>
+      <label style="margin:0" for="mostrarLlamadas">Mostrar la llamada a la API en cada paso</label>
+    </div>
+
+    <div class="divider"></div>
+
+    <h2>Consultar vehículo</h2>
+    <label>Modelo</label>
+    <input id="modelo" type="text" placeholder="ej. JETTA, CR-V, X-TRAIL">
+    <label>Año</label>
+    <input id="anio" type="number" placeholder="ej. 2024">
+    <button id="btnConsultar" style="width:100%; margin-top:12px">Consultar</button>
+
+    <div class="divider"></div>
+
+    <h2>O una frase libre</h2>
+    <label>Texto (marca, línea y/o año, en cualquier orden)</label>
+    <input id="textoLibre" type="text" placeholder="ej. Volkswagen Jetta 2020">
+    <button id="btnInterpretar" class="secondary" style="width:100%; margin-top:10px">Interpretar</button>
+
+    <div class="divider"></div>
+
+    <h2>Subir tablota nueva</h2>
+    <label>Archivo CSV</label>
+    <input id="archivoTablota" type="file" accept=".csv">
+    <label>tablota_id (opcional)</label>
+    <input id="nuevoTablotaId" type="text" placeholder="se genera si se deja vacio">
+    <button id="btnSubir" class="secondary" style="width:100%; margin-top:10px">Subir tablota</button>
+    <div id="subirResultado" class="foot"></div>
+  </div>
+
+  <div class="card">
+    <h2>Conversación</h2>
+    <div id="msgs" class="msgs"></div>
+    <form id="respuestaForm" style="display:none">
+      <input id="respuestaInput" type="text" placeholder="responde en texto libre...">
+      <button type="submit">Enviar</button>
+    </form>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+$("baseUrl").value = window.location.origin;
+
+let sessionId = null;
+
+function headers(json=true){
+  const h = {"X-API-Key": $("apiKey").value.trim()};
+  if (json) h["Content-Type"] = "application/json";
+  return h;
+}
+
+function addBubble(html, cls="bot"){
+  const div = document.createElement("div");
+  div.className = "bubble " + cls;
+  div.innerHTML = html;
+  $("msgs").appendChild(div);
+  div.scrollIntoView({behavior:"smooth", block:"end"});
+  return div;
+}
+
+function pill(estado){
+  return `<span class="estado-pill">${estado}</span>`;
+}
+
+function escapeHtml(s){
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function escapeAttr(s){ return escapeHtml(s).replace(/"/g, "&quot;"); }
+
+// --- bloque "ver llamada a la API" (request + response + curl copiable) ---
+
+function maskKey(v){
+  if (!v) return "";
+  if (v.length <= 8) return "•".repeat(v.length);
+  return v.slice(0,4) + "…" + v.slice(-4);
+}
+
+function curlEscape(s){
+  return String(s).replace(/'/g, `'\\''`);
+}
+
+function curlComando({method, url, hdrs, bodyObj, multipart}){
+  let cmd = `curl -X ${method} '${curlEscape(url)}'`;
+  for (const [k,v] of Object.entries(hdrs)){
+    if (multipart && k.toLowerCase() === "content-type") continue; // curl -F pone su propio boundary
+    cmd += ` \\\n  -H '${curlEscape(k)}: ${curlEscape(v)}'`;
+  }
+  if (multipart){
+    for (const [k,v] of multipart) cmd += ` \\\n  -F '${curlEscape(k)}=${curlEscape(v)}'`;
+  } else if (bodyObj !== undefined){
+    cmd += ` \\\n  -d '${curlEscape(JSON.stringify(bodyObj))}'`;
+  }
+  return cmd;
+}
+
+function bloqueLlamada({method, url, hdrs, bodyObj, multipart, status, respText}){
+  if (!$("mostrarLlamadas").checked) return "";
+
+  const curl = curlComando({method, url, hdrs, bodyObj, multipart});
+
+  const hdrsTexto = Object.entries(hdrs)
+    .map(([k,v]) => `${k}: ${k.toLowerCase() === "x-api-key" ? maskKey(v) : v}`)
+    .join("\n");
+
+  let cuerpoTexto = "";
+  if (multipart){
+    cuerpoTexto = multipart.map(([k,v]) => `${k}=${v}`).join("\n");
+  } else if (bodyObj !== undefined){
+    cuerpoTexto = JSON.stringify(bodyObj, null, 2);
+  }
+
+  let respTexto = respText;
+  try{ respTexto = JSON.stringify(JSON.parse(respText), null, 2); }catch(e){ /* no era JSON */ }
+
+  const ruta = url.replace(/^https?:\/\/[^/]+/, "");
+
+  return `
+    <details class="llamada">
+      <summary>ver llamada a la API — ${method} ${escapeHtml(ruta)} · HTTP ${status}</summary>
+      <div class="llamada-body">
+        <div class="llamada-label">Request</div>
+        <pre>${method} ${escapeHtml(url)}
+${escapeHtml(hdrsTexto)}${cuerpoTexto ? "\n\n" + escapeHtml(cuerpoTexto) : ""}</pre>
+        <div class="llamada-label">Response (HTTP ${status})</div>
+        <pre>${escapeHtml(respTexto)}</pre>
+        <button type="button" class="secondary llamada-copy" data-curl="${escapeAttr(curl)}">Copiar como curl</button>
+      </div>
+    </details>`;
+}
+
+// delegacion: cualquier boton .llamada-copy copia su curl al portapapeles
+document.addEventListener("click", (ev) => {
+  const btn = ev.target.closest(".llamada-copy");
+  if (!btn) return;
+  const texto = btn.dataset.curl.replace(/&quot;/g, '"');
+  navigator.clipboard.writeText(texto).then(() => {
+    const original = btn.textContent;
+    btn.textContent = "Copiado ✓";
+    btn.classList.add("copiado");
+    setTimeout(() => { btn.textContent = original; btn.classList.remove("copiado"); }, 1500);
+  });
+});
+
+function renderResultado(d, llamadaHtml=""){
+  if (d.estado === "resuelto"){
+    addBubble(
+      `${pill("resuelto")}<div>Clave: <span class="clave">${d.clave}</span></div>
+       <div>${escapeHtml(d.descripcion)}</div>
+       <small>Marca: ${d.marca || "—"} · preguntas hechas: ${d.preguntas_hechas} · modelo_resuelto: ${d.modelo_resuelto || "—"}</small>
+       ${llamadaHtml}`,
+      "ok"
+    );
+    $("respuestaForm").style.display = "none";
+    sessionId = null;
+    return;
+  }
+  if (d.estado === "pregunta"){
+    sessionId = d.session_id;
+    const opciones = (d.pregunta.opciones || []).map(o =>
+      `<button type="button" data-valor="${escapeAttr(o)}">${escapeHtml(o)}</button>`
+    ).join("");
+    const b = addBubble(
+      `${pill("pregunta · " + d.pregunta.familia)}<div>${escapeHtml(d.pregunta.texto)}</div>
+       <div class="opciones">${opciones}</div>
+       <small>candidatas restantes: ${d.candidatas_restantes} · modelo_resuelto: ${d.modelo_resuelto || "—"}</small>
+       ${llamadaHtml}`
+    );
+    b.querySelectorAll("button[data-valor]").forEach(btn=>{
+      btn.addEventListener("click", () => responder({valor: btn.dataset.valor}));
+    });
+    $("respuestaForm").style.display = "flex";
+    return;
+  }
+  if (d.estado === "aclaracion"){
+    sessionId = d.session_id;
+    const opciones = (d.coincidencias || []).map(c =>
+      `<button type="button" data-valor="${escapeAttr(c.clave)}" data-modo="clave">${escapeHtml(c.descripcion)}</button>`
+    ).join("");
+    addBubble(
+      `${pill("aclaración")}<div>Tu respuesta matchea varias opciones. Elige una:</div>
+       <div class="opciones">${opciones}</div>
+       ${llamadaHtml}`,
+      "warn"
+    );
+    $("respuestaForm").style.display = "flex";
+    return;
+  }
+  if (d.estado === "ambiguo"){
+    const listado = (d.listado_completo || []).map(c =>
+      `<button type="button" data-valor="${escapeAttr(c.clave)}">${escapeHtml(c.descripcion)}</button>`
+    ).join("");
+    const b = addBubble(
+      `${pill("ambiguo")}<div>No se pudo discriminar más con los atributos conocidos. Elige la clave correcta:</div>
+       <div class="opciones">${listado}</div>
+       ${llamadaHtml}`,
+      "warn"
+    );
+    $("respuestaForm").style.display = "none";
+    sessionId = d.session_id;
+    b.querySelectorAll("button[data-valor]").forEach(btn=>{
+      btn.addEventListener("click", () => responder({clave: btn.dataset.valor}));
+    });
+    return;
+  }
+  if (d.estado === "sin_match_final"){
+    sessionId = d.session_id;
+    const listado = (d.listado_completo || []).map(c =>
+      `<button type="button" data-valor="${escapeAttr(c.clave)}">${escapeHtml(c.descripcion)}</button>`
+    ).join("");
+    const b = addBubble(
+      `${pill("sin match")}<div>No reconocí las últimas respuestas. Elige directo la clave:</div>
+       <div class="opciones">${listado}</div>
+       ${llamadaHtml}`,
+      "warn"
+    );
+    b.querySelectorAll("button[data-valor]").forEach(btn=>{
+      btn.addEventListener("click", () => responder({clave: btn.dataset.valor}));
+    });
+    return;
+  }
+  if (d.estado === "sin_resultado"){
+    const sug = (d.sugerencias || []).map(s =>
+      `<button type="button" data-modelo="${escapeAttr(s)}">${escapeHtml(s)}</button>`
+    ).join("");
+    const b = addBubble(
+      `${pill("sin resultado")}<div>No hay candidatas para ese MODELO + AÑO.</div>
+       ${sug ? `<div class="foot">¿Quisiste decir?</div><div class="opciones">${sug}</div>` : ""}
+       ${llamadaHtml}`,
+      "err"
+    );
+    b.querySelectorAll("button[data-modelo]").forEach(btn=>{
+      btn.addEventListener("click", () => { $("modelo").value = btn.dataset.modelo; consultar(); });
+    });
+    $("respuestaForm").style.display = "none";
+    sessionId = null;
+    return;
+  }
+}
+
+async function consultar(){
+  const modelo = $("modelo").value.trim();
+  const anio = $("anio").value.trim();
+  if (!modelo || !anio){ alert("Falta modelo o año"); return; }
+  addBubble(`<b>${escapeHtml(modelo)} ${escapeHtml(anio)}</b>`, "user");
+
+  const url = $("baseUrl").value.replace(/\/$/,"") + "/consulta";
+  const hdrs = headers();
+  const bodyObj = {modelo, anio, tablota_id: $("tablotaId").value.trim() || "default"};
+
+  try{
+    const r = await fetch(url, {method:"POST", headers: hdrs, body: JSON.stringify(bodyObj)});
+    const respText = await r.text();
+    let d; try{ d = JSON.parse(respText); }catch(e){ d = null; }
+    const llamadaHtml = bloqueLlamada({method:"POST", url, hdrs, bodyObj, status:r.status, respText});
+    if (!r.ok){
+      addBubble(`${pill("error " + r.status)}<div>${escapeHtml((d && d.detail) || respText)}</div>${llamadaHtml}`, "err");
+      return;
+    }
+    renderResultado(d, llamadaHtml);
+  }catch(e){ addBubble(`${pill("error red")}<div>${escapeHtml(e.message)}</div>`, "err"); }
+}
+
+async function interpretarTexto(){
+  const texto = $("textoLibre").value.trim();
+  if (!texto){ alert("Escribe algo, ej. 'Volkswagen Jetta 2020'"); return; }
+  addBubble(escapeHtml(texto), "user");
+
+  const url = $("baseUrl").value.replace(/\/$/,"") + "/interpretar";
+  const hdrs = headers();
+  const bodyObj = {texto, tablota_id: $("tablotaId").value.trim() || "default"};
+
+  try{
+    const r = await fetch(url, {method:"POST", headers: hdrs, body: JSON.stringify(bodyObj)});
+    const respText = await r.text();
+    let d; try{ d = JSON.parse(respText); }catch(e){ d = null; }
+    const llamadaHtml = bloqueLlamada({method:"POST", url, hdrs, bodyObj, status:r.status, respText});
+    if (!r.ok){
+      addBubble(`${pill("error " + r.status)}<div>${escapeHtml((d && d.detail) || respText)}</div>${llamadaHtml}`, "err");
+      return;
+    }
+
+    const detectado = `año: ${d.anio_detectado || "—"} · modelo/línea: ${d.modelo_detectado || "—"}`;
+    if (d.aviso){
+      const sug = (d.sugerencias || []).map(s =>
+        `<button type="button" data-modelo="${escapeAttr(s)}">${escapeHtml(s)}</button>`
+      ).join("");
+      const b = addBubble(
+        `${pill("no se pudo interpretar")}<small>${escapeHtml(detectado)}</small><div>${escapeHtml(d.aviso)}</div>
+         ${sug ? `<div class="opciones">${sug}</div>` : ""}
+         ${llamadaHtml}`,
+        "err"
+      );
+      b.querySelectorAll("button[data-modelo]").forEach(btn=>{
+        btn.addEventListener("click", () => { $("modelo").value = btn.dataset.modelo; consultar(); });
+      });
+      return;
+    }
+
+    addBubble(`${pill("interpretado")}<small>${escapeHtml(detectado)}</small>`);
+    renderResultado(d.resultado, llamadaHtml);
+  }catch(e){ addBubble(`${pill("error red")}<div>${escapeHtml(e.message)}</div>`, "err"); }
+}
+
+async function responder(body){
+  if (!sessionId) return;
+  const label = body.respuesta ?? body.valor ?? body.clave;
+  addBubble(escapeHtml(label), "user");
+
+  const url = $("baseUrl").value.replace(/\/$/,"") + `/consulta/${sessionId}/responder`;
+  const hdrs = headers();
+
+  try{
+    const r = await fetch(url, {method:"POST", headers: hdrs, body: JSON.stringify(body)});
+    const respText = await r.text();
+    let d; try{ d = JSON.parse(respText); }catch(e){ d = null; }
+    const llamadaHtml = bloqueLlamada({method:"POST", url, hdrs, bodyObj: body, status:r.status, respText});
+    if (!r.ok){
+      addBubble(`${pill("error " + r.status)}<div>${escapeHtml((d && d.detail) || respText)}</div>${llamadaHtml}`, "err");
+      return;
+    }
+    renderResultado(d, llamadaHtml);
+  }catch(e){ addBubble(`${pill("error red")}<div>${escapeHtml(e.message)}</div>`, "err"); }
+}
+
+$("btnConsultar").addEventListener("click", consultar);
+$("btnInterpretar").addEventListener("click", interpretarTexto);
+$("respuestaForm").addEventListener("submit", (ev)=>{
+  ev.preventDefault();
+  const val = $("respuestaInput").value.trim();
+  if (!val) return;
+  $("respuestaInput").value = "";
+  responder({respuesta: val});
+});
+
+$("btnSubir").addEventListener("click", async ()=>{
+  const f = $("archivoTablota").files[0];
+  if (!f){ alert("elige un CSV"); return; }
+
+  const tid = $("nuevoTablotaId").value.trim();
+  const fd = new FormData();
+  fd.append("archivo", f);
+  if (tid) fd.append("tablota_id", tid);
+
+  const url = $("baseUrl").value.replace(/\/$/,"") + "/tablotas";
+  const hdrs = headers(false);
+  const multipart = [["archivo", f.name]];
+  if (tid) multipart.push(["tablota_id", tid]);
+
+  $("subirResultado").innerHTML = "Subiendo...";
+  try{
+    const r = await fetch(url, {method:"POST", headers: hdrs, body: fd});
+    const respText = await r.text();
+    let d; try{ d = JSON.parse(respText); }catch(e){ d = null; }
+    const llamadaHtml = bloqueLlamada({method:"POST", url, hdrs, multipart, status:r.status, respText});
+    if (!r.ok){
+      $("subirResultado").innerHTML = `Error: ${escapeHtml((d && d.detail) || String(r.status))}${llamadaHtml}`;
+      return;
+    }
+    $("subirResultado").innerHTML =
+      `OK: tablota_id="${escapeHtml(d.tablota_id)}" (${d.filas} filas, ${d.grupos_modelo_anio} grupos)${llamadaHtml}`;
+    $("tablotaId").value = d.tablota_id;
+  }catch(e){ $("subirResultado").textContent = "Error de red: " + e.message; }
+});
+</script>
+</body>
+</html>
