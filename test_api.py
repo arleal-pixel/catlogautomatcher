@@ -210,6 +210,68 @@ check(d["modelo_detectado"] == "RIO" and d["resultado"]["estado"] == "pregunta"
       f"'Río 2018' (con acento) -> resuelve a RIO, 12 candidatas (obtuvo {d.get('modelo_detectado')}, "
       f"{d.get('resultado',{}).get('estado')}, {d.get('resultado',{}).get('candidatas_restantes')})")
 
+# --- /autocomplete: MARCA+MODELO+AÑO para llenar un input en otro sistema ---
+r = client.get("/autocomplete", headers=H, params={"q": "coro", "limit": 5})
+check(r.status_code == 200, "GET /autocomplete 200")
+d = r.json()
+labels = [x["label"] for x in d["resultados"]]
+check(len(d["resultados"]) == 5 and all("COROLLA" in l for l in labels),
+      f"'coro' -> 5 resultados, todos COROLLA (obtuvo {labels})")
+
+# sin API key -> 401 (mismo esquema de auth que el resto de la API)
+r = client.get("/autocomplete", params={"q": "coro"})
+check(r.status_code == 401, "GET /autocomplete sin API key -> 401")
+
+# busca por MODELO (no por MARCA primero) -- el caso comun de un autocomplete real
+r = client.get("/autocomplete", headers=H, params={"q": "crv", "limit": 10})
+d = r.json()
+labels = [x["label"] for x in d["resultados"]]
+check(len(d["resultados"]) > 0 and all("CR-V" in l for l in labels),
+      f"'crv' (sin espacio, sin marca) -> resultados CR-V (obtuvo {labels})")
+
+r = client.get("/autocomplete", headers=H, params={"q": "mg5", "limit": 10})
+d = r.json()
+labels = [x["label"] for x in d["resultados"]]
+check(len(d["resultados"]) > 0 and all(l.startswith("MG 5") for l in labels),
+      f"'mg5' -> resultados MG 5 (obtuvo {labels})")
+
+# escribir la marca primero tambien funciona (prefijo del label completo)
+r = client.get("/autocomplete", headers=H, params={"q": "toyota coro", "limit": 10})
+d = r.json()
+labels = [x["label"] for x in d["resultados"]]
+check(len(d["resultados"]) > 0 and all(l.startswith("TOYOTA COROLLA") for l in labels),
+      f"'toyota coro' -> resultados TOYOTA COROLLA (obtuvo {labels})")
+
+# sublinea: modelo generico en la tablota (COROLLA) tambien sugiere la sublinea especifica
+r = client.get("/autocomplete", headers=H, params={"q": "corolla cross", "limit": 10})
+d = r.json()
+check(len(d["resultados"]) > 0 and all(x["modelo"] == "COROLLA CROSS" for x in d["resultados"]),
+      f"'corolla cross' -> sugiere el modelo especifico 'COROLLA CROSS' (obtuvo {[x['modelo'] for x in d['resultados']]})")
+# el modelo devuelto se puede mandar directo a /consulta sin ambiguedad
+mitem = d["resultados"][0]
+r = client.post("/consulta", headers=H, json={"modelo": mitem["modelo"], "anio": int(mitem["anio"])})
+d2 = r.json()
+check(d2["estado"] in ("pregunta", "resuelto"),
+      f"el 'modelo' de /autocomplete funciona directo en /consulta (obtuvo estado={d2['estado']})")
+
+# limit se respeta y tiene tope de 25
+r = client.get("/autocomplete", headers=H, params={"q": "corolla", "limit": 3})
+d = r.json()
+check(len(d["resultados"]) == 3, f"limit=3 se respeta (obtuvo {len(d['resultados'])})")
+
+r = client.get("/autocomplete", headers=H, params={"q": "a", "limit": 999})
+d = r.json()
+check(len(d["resultados"]) <= 25, f"limit se topa en 25 (obtuvo {len(d['resultados'])})")
+
+# tablota_id inexistente -> 404, no 500
+r = client.get("/autocomplete", headers=H, params={"q": "coro", "tablota_id": "no_existe_xyz"})
+check(r.status_code == 404, f"tablota_id inexistente -> 404 (obtuvo {r.status_code})")
+
+# query vacia -> lista vacia, no error
+r = client.get("/autocomplete", headers=H, params={"q": ""})
+d = r.json()
+check(r.status_code == 200 and d["resultados"] == [], f"q vacio -> resultados vacios sin error (obtuvo {d})")
+
 # --- probador HTML + docs ---
 r = client.get("/")
 check(r.status_code == 200 and "text/html" in r.headers.get("content-type", ""), "GET / sirve el probador HTML")

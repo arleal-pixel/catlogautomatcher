@@ -196,6 +196,18 @@ class TarjetaOut(BaseModel):
     )
 
 
+class AutocompleteItemOut(BaseModel):
+    marca: Optional[str] = None
+    modelo: str
+    anio: str
+    label: str
+
+
+class AutocompleteOut(BaseModel):
+    query: str
+    resultados: List[AutocompleteItemOut]
+
+
 class GHLWebhookOut(BaseModel):
     ok: bool
     contact_id: Optional[str] = None
@@ -304,6 +316,28 @@ async def subir_tablota(archivo: UploadFile = File(...), tablota_id: Optional[st
 @app.get("/tablotas", dependencies=[Depends(verificar_api_key)])
 def listar_tablotas():
     return store.listar()
+
+
+@app.get("/autocomplete", response_model=AutocompleteOut, dependencies=[Depends(verificar_api_key)])
+def autocomplete(q: str, limit: int = 10, tablota_id: str = "default"):
+    """Autocompletado de vehiculos (MARCA + MODELO + AÑO) para llenar un
+    input de texto en otro sistema -- pensado para llamarse en cada
+    keystroke, no arranca ninguna sesion de conversacion.
+
+    Matchea primero por prefijo (el texto normalizado al inicio del
+    vehiculo) y, si sobran huecos hasta `limit`, completa con matches por
+    substring en cualquier parte. Tolerante a formato igual que /consulta
+    (mayusculas/acentos/espacios no importan).
+
+    El `modelo` que devuelve cada resultado es el valor EXACTO de la base
+    de datos -- se puede mandar directo a POST /consulta sin resolver nada
+    de nuevo."""
+    try:
+        idx = store.autocomplete(tablota_id)
+    except TablotaError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    limit = max(1, min(limit, 25))
+    return AutocompleteOut(query=q, resultados=[AutocompleteItemOut(**r) for r in idx.buscar(q, limit)])
 
 
 @app.post("/tarjeta-circulacion", response_model=TarjetaOut, dependencies=[Depends(verificar_api_key)])

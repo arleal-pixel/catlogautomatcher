@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from autocomplete_index import IndiceAutocomplete
 from modelo_index import IndiceModelos
 
 DATA_DIR = Path(os.environ.get("TABLOTAS_DIR", Path(__file__).parent / "data" / "tablotas"))
@@ -31,6 +32,7 @@ class TablotaStore:
         self._rows: Dict[str, List[dict]] = {}
         self._meta: Dict[str, dict] = {}
         self._indices: Dict[str, IndiceModelos] = {}
+        self._autocompletes: Dict[str, IndiceAutocomplete] = {}
         # (MODELO, AÑO) -> filas de ese grupo, construido una vez al cargar.
         # Evita que cada /consulta escanee TODA la tablota (28k+ filas) --
         # con esto solo mira las pocas filas del grupo que le toca.
@@ -104,6 +106,7 @@ class TablotaStore:
             "cargado": datetime.now(timezone.utc).isoformat(),
         }
         self._indices.pop(tid, None)  # invalidar cache si se resube con el mismo id
+        self._autocompletes.pop(tid, None)
         return tid
 
     def obtener(self, tablota_id: str) -> List[dict]:
@@ -126,6 +129,15 @@ class TablotaStore:
         if tablota_id not in self._indices:
             self._indices[tablota_id] = IndiceModelos(self._rows[tablota_id])
         return self._indices[tablota_id]
+
+    def autocomplete(self, tablota_id: str) -> IndiceAutocomplete:
+        """Indice de autocompletado (MARCA+MODELO+AÑO unicos), construido
+        una sola vez por base de datos y cacheado."""
+        if tablota_id not in self._rows:
+            raise TablotaError(f"tablota_id '{tablota_id}' no existe")
+        if tablota_id not in self._autocompletes:
+            self._autocompletes[tablota_id] = IndiceAutocomplete(self._rows[tablota_id])
+        return self._autocompletes[tablota_id]
 
     def listar(self) -> Dict[str, dict]:
         out = {}

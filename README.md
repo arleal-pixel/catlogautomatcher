@@ -175,6 +175,66 @@ mencionados puede no encontrar la ventana de texto correcta. Siempre
 conviene revisar `modelo_detectado`/`anio_detectado` en la respuesta antes
 de confiar en el resultado.
 
+## Autocompletado de vehículos → `/autocomplete`
+
+```bash
+curl -s -G localhost:8000/autocomplete \
+  -H "X-API-Key: $API_KEY" \
+  --data-urlencode "q=coro" --data-urlencode "limit=10"
+```
+
+Pensado para llenar un input de texto en **otro sistema** (no en este chat):
+se llama en cada tecla que escribe el usuario y devuelve una lista corta de
+vehículos que matchean, sin arrancar ninguna sesión de conversación ni tocar
+`SESIONES`. Misma autenticación `X-API-Key` que el resto de la API.
+
+Parámetros (querystring, todos por GET):
+
+| Parámetro     | Requerido | Default     | Descripción                                  |
+|---------------|-----------|-------------|-----------------------------------------------|
+| `q`           | sí        | —           | Texto escrito por el usuario hasta ahora      |
+| `limit`       | no        | 10          | Máximo de resultados (tope duro: 25)          |
+| `tablota_id`  | no        | `"default"` | Sobre qué base de datos autocompletar         |
+
+Respuesta:
+
+```json
+{
+  "query": "coro",
+  "resultados": [
+    {"marca": "TOYOTA", "modelo": "COROLLA", "anio": "2026", "label": "TOYOTA COROLLA 2026"},
+    {"marca": "TOYOTA", "modelo": "COROLLA", "anio": "2025", "label": "TOYOTA COROLLA 2025"}
+  ]
+}
+```
+
+**Granularidad: MARCA + MODELO + AÑO** (no la CLAVE/versión completa). Cada
+resultado es una combinación única de esos tres campos — no una fila de la
+base de datos por separado — así que un modelo con 9 versiones para el mismo
+año aparece **una sola vez** en el autocomplete, no 9 veces. El `modelo` que
+devuelve cada resultado es el valor exacto para mandar directo a
+`POST /consulta` (o a `/consulta` con `tablota_id`) sin tener que resolver
+nada de nuevo — incluye las "sublíneas" que separa `/consulta` (ver sección
+de arriba: buscar "corolla cross" sugiere el `modelo` ya armado
+`"COROLLA CROSS"`, no el genérico `"COROLLA"` que mezclaría el sedán).
+
+**Cómo matchea:** primero prefijo, luego contiene (rellena lo que falte hasta
+`limit`). "Prefijo" no exige que el texto arranque literalmente el label
+completo (que empieza con la MARCA) — también cuenta si el texto es
+prefijo de **cualquier palabra** del label. Así "coro" encuentra "TOYOTA
+COROLLA..." (prefijo de la palabra COROLLA, no de "TOYOTA"), "toyota coro"
+también funciona (prefijo del label completo), y formas sin espacio como
+"crv" o "mg5" igual resuelven a "HONDA CR-V..." / "MG 5..." tolerando que el
+usuario no haya puesto el guion/espacio. Si ninguna de esas dos formas de
+prefijo llena el `limit` pedido, se completa con matches por substring en
+cualquier parte del label.
+
+**Desempeño:** indexado una sola vez por base de datos y cacheado en memoria
+(igual que el índice de `/consulta`) — el primer llamado tras subir/cambiar
+una base de datos es más lento, los siguientes son rápidos. Con la base de
+datos real (~19,000 combinaciones MARCA+MODELO+AÑO, incluyendo sublíneas)
+cada llamada a `buscar()` toma bajo 1ms.
+
 ## Leer una tarjeta de circulación (OCR) → `/tarjeta-circulacion`
 
 ```bash

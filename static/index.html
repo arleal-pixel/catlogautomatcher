@@ -75,6 +75,15 @@
   }
   .llamada-copy{margin-top:8px; font-size:12px; padding:6px 10px}
   .llamada-copy.copiado{background:var(--accent2)}
+
+  /* --- demo de /autocomplete --- */
+  .autocomplete-lista{margin-top:6px; display:flex; flex-direction:column; gap:2px; max-height:260px; overflow-y:auto}
+  .autocomplete-lista button{
+    width:100%; text-align:left; background:var(--panel2); border:1px solid var(--border);
+    color:var(--text); font-size:13px; padding:7px 10px; border-radius:6px;
+  }
+  .autocomplete-lista button:hover{border-color:var(--accent)}
+  .autocomplete-lista .vacio{color:var(--muted); font-size:12px; padding:4px 2px}
 </style>
 </head>
 <body>
@@ -113,6 +122,15 @@
     <label>Texto (marca, línea y/o año, en cualquier orden)</label>
     <input id="textoLibre" type="text" placeholder="ej. Volkswagen Jetta 2020">
     <button id="btnInterpretar" class="secondary" style="width:100%; margin-top:10px">Interpretar</button>
+
+    <div class="divider"></div>
+
+    <h2>Autocompletar (demo para otro sistema)</h2>
+    <p class="foot" style="margin:-6px 0 8px">Simula el input que llenaría otra app llamando a <code>GET /autocomplete</code> en cada tecla.</p>
+    <label>Escribe marca o modelo</label>
+    <input id="autocompleteInput" type="text" placeholder="ej. coro, crv, mg5, toyota coro" autocomplete="off">
+    <div id="autocompleteLista" class="autocomplete-lista"></div>
+    <div id="autocompleteLlamada"></div>
 
     <div class="divider"></div>
 
@@ -425,6 +443,55 @@ async function responder(body){
     }
     renderResultado(d, llamadaHtml);
   }catch(e){ addBubble(`${pill("error red")}<div>${escapeHtml(e.message)}</div>`, "err"); }
+}
+
+// --- demo de /autocomplete: se llama con debounce en cada tecla, igual
+// que lo haría otra app llenando un input de texto. Clickear una sugerencia
+// llena Modelo/Año de arriba y dispara la consulta normal.
+let autocompleteTimer = null;
+$("autocompleteInput").addEventListener("input", () => {
+  clearTimeout(autocompleteTimer);
+  const q = $("autocompleteInput").value.trim();
+  if (!q){ $("autocompleteLista").innerHTML = ""; $("autocompleteLlamada").innerHTML = ""; return; }
+  autocompleteTimer = setTimeout(() => buscarAutocomplete(q), 200);
+});
+
+async function buscarAutocomplete(q){
+  const tablotaId = $("tablotaId").value.trim() || "default";
+  const url = $("baseUrl").value.replace(/\/$/,"") + "/autocomplete"
+    + `?q=${encodeURIComponent(q)}&limit=8&tablota_id=${encodeURIComponent(tablotaId)}`;
+  const hdrs = headers(false);
+
+  try{
+    const r = await fetch(url, {method:"GET", headers: hdrs});
+    const respText = await r.text();
+    let d; try{ d = JSON.parse(respText); }catch(e){ d = null; }
+    $("autocompleteLlamada").innerHTML = bloqueLlamada({method:"GET", url, hdrs, status:r.status, respText});
+
+    if (!r.ok){
+      $("autocompleteLista").innerHTML = `<div class="vacio">Error ${r.status}: ${escapeHtml((d && d.detail) || respText)}</div>`;
+      return;
+    }
+    const resultados = (d && d.resultados) || [];
+    if (!resultados.length){
+      $("autocompleteLista").innerHTML = `<div class="vacio">sin resultados</div>`;
+      return;
+    }
+    $("autocompleteLista").innerHTML = resultados.map(item =>
+      `<button type="button" data-modelo="${escapeAttr(item.modelo)}" data-anio="${escapeAttr(item.anio)}">${escapeHtml(item.label)}</button>`
+    ).join("");
+    $("autocompleteLista").querySelectorAll("button[data-modelo]").forEach(btn=>{
+      btn.addEventListener("click", () => {
+        $("autocompleteInput").value = btn.textContent;
+        $("autocompleteLista").innerHTML = "";
+        $("modelo").value = btn.dataset.modelo;
+        $("anio").value = btn.dataset.anio;
+        consultar();
+      });
+    });
+  }catch(e){
+    $("autocompleteLista").innerHTML = `<div class="vacio">error de red: ${escapeHtml(e.message)}</div>`;
+  }
 }
 
 $("btnConsultar").addEventListener("click", consultar);
