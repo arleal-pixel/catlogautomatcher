@@ -235,6 +235,28 @@ una base de datos es más lento, los siguientes son rápidos. Con la base de
 datos real (~19,000 combinaciones MARCA+MODELO+AÑO, incluyendo sublíneas)
 cada llamada a `buscar()` toma bajo 1ms.
 
+### Flujo de dos pasos: año primero → `/anios` + `anio` en `/autocomplete`
+
+Para un input donde conviene que el usuario elija el año antes de escribir
+marca/modelo (evita ambigüedad y acorta la lista), hay dos piezas extra:
+
+```bash
+# 1) poblar un selector de año
+curl -s localhost:8000/anios -H "X-API-Key: $API_KEY"
+# {"tablota_id":"default","anios":["2027","2026","2025", ...]}
+
+# 2) autocompletar marca/modelo YA FILTRADO a ese año
+curl -s -G localhost:8000/autocomplete -H "X-API-Key: $API_KEY" \
+  --data-urlencode "q=coro" --data-urlencode "anio=2024"
+```
+
+`GET /anios` devuelve los AÑO distintos de la base de datos, más reciente
+primero. `GET /autocomplete` acepta el parámetro opcional `anio` — si se
+manda, solo devuelve resultados de ese año exacto (mismo mecanismo de
+prefijo/contiene, solo que sobre un subconjunto ya acotado). Sin `anio` se
+comporta igual que antes (busca en todos los años). El probador HTML (`GET
+/`) tiene este flujo de dos pasos implementado como demo.
+
 ## Leer una tarjeta de circulación (OCR) → `/tarjeta-circulacion`
 
 ```bash

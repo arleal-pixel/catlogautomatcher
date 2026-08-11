@@ -272,6 +272,31 @@ r = client.get("/autocomplete", headers=H, params={"q": ""})
 d = r.json()
 check(r.status_code == 200 and d["resultados"] == [], f"q vacio -> resultados vacios sin error (obtuvo {d})")
 
+# --- /anios: años distintos para poblar un selector ANTES del autocomplete ---
+r = client.get("/anios", headers=H)
+check(r.status_code == 200, "GET /anios 200")
+d = r.json()
+check(d["tablota_id"] == "default" and len(d["anios"]) > 0 and d["anios"] == sorted(d["anios"], key=lambda a: -int(a)),
+      f"/anios devuelve años ordenados, mas reciente primero (obtuvo primeros 3: {d['anios'][:3]})")
+
+r = client.get("/anios", params={"tablota_id": "no_existe_xyz"}, headers=H)
+check(r.status_code == 404, f"/anios con tablota_id inexistente -> 404 (obtuvo {r.status_code})")
+
+r = client.get("/anios", params={"tablota_id": "mini_test"}, headers=H)
+d = r.json()
+check(r.status_code == 200 and d["anios"] == ["2019"],
+      f"/anios sobre tablota subida (MDX 2019 nada mas) -> ['2019'] (obtuvo {d.get('anios')})")
+
+# --- /autocomplete con filtro `anio`: flujo de dos pasos (año primero) ---
+r = client.get("/autocomplete", headers=H, params={"q": "coro", "anio": "2024", "limit": 10})
+d = r.json()
+check(len(d["resultados"]) > 0 and all(x["anio"] == "2024" for x in d["resultados"]),
+      f"'coro' con anio=2024 -> solo resultados de 2024 (obtuvo {[x['anio'] for x in d['resultados']]})")
+
+r = client.get("/autocomplete", headers=H, params={"q": "coro", "anio": "1999", "limit": 10})
+d = r.json()
+check(d["resultados"] == [], f"'coro' con anio=1999 (no existe para Corolla) -> vacio (obtuvo {d['resultados']})")
+
 # --- probador HTML + docs ---
 r = client.get("/")
 check(r.status_code == 200 and "text/html" in r.headers.get("content-type", ""), "GET / sirve el probador HTML")

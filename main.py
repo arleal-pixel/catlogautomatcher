@@ -208,6 +208,11 @@ class AutocompleteOut(BaseModel):
     resultados: List[AutocompleteItemOut]
 
 
+class AniosOut(BaseModel):
+    tablota_id: str
+    anios: List[str]
+
+
 class GHLWebhookOut(BaseModel):
     ok: bool
     contact_id: Optional[str] = None
@@ -222,6 +227,15 @@ class GHLWebhookOut(BaseModel):
 # --------------------------------------------------------------------------
 def _cout(c: dict) -> CandidataOut:
     return CandidataOut(clave=c["clave"], descripcion=c["descripcion"], marca=c.get("marca"))
+
+
+def _anio_sort_key(a: str):
+    """Años numericos primero (mas reciente primero), cualquier valor no
+    numerico al final, alfabetico -- usado para poblar un selector de año."""
+    try:
+        return (0, -int(a))
+    except ValueError:
+        return (1, a)
 
 
 def _evaluar(sid: str) -> ResultadoOut:
@@ -318,8 +332,21 @@ def listar_tablotas():
     return store.listar()
 
 
+@app.get("/anios", response_model=AniosOut, dependencies=[Depends(verificar_api_key)])
+def listar_anios(tablota_id: str = "default"):
+    """AÑO distintos disponibles en la base de datos, mas reciente primero --
+    pensado para poblar un selector de año ANTES del autocomplete de
+    marca/modelo (ver el parametro `anio` de GET /autocomplete)."""
+    try:
+        grupos = store.grupos(tablota_id)
+    except TablotaError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    anios = sorted({a for (_modelo, a) in grupos.keys() if a}, key=_anio_sort_key)
+    return AniosOut(tablota_id=tablota_id, anios=anios)
+
+
 @app.get("/autocomplete", response_model=AutocompleteOut, dependencies=[Depends(verificar_api_key)])
-def autocomplete(q: str, limit: int = 10, tablota_id: str = "default"):
+def autocomplete(q: str, limit: int = 10, tablota_id: str = "default", anio: Optional[str] = None):
     """Autocompletado de vehiculos (MARCA + MODELO + AÑO) para llenar un
     input de texto en otro sistema -- pensado para llamarse en cada
     keystroke, no arranca ninguna sesion de conversacion.
@@ -329,6 +356,11 @@ def autocomplete(q: str, limit: int = 10, tablota_id: str = "default"):
     substring en cualquier parte. Tolerante a formato igual que /consulta
     (mayusculas/acentos/espacios no importan).
 
+    Si se manda `anio` (ver GET /anios para los valores disponibles),
+    restringe los resultados a ese año -- pensado para un flujo de dos pasos
+    donde el usuario elige año primero y despues busca marca/modelo dentro
+    de ese año.
+
     El `modelo` que devuelve cada resultado es el valor EXACTO de la base
     de datos -- se puede mandar directo a POST /consulta sin resolver nada
     de nuevo."""
@@ -337,7 +369,7 @@ def autocomplete(q: str, limit: int = 10, tablota_id: str = "default"):
     except TablotaError as e:
         raise HTTPException(status_code=404, detail=str(e))
     limit = max(1, min(limit, 25))
-    return AutocompleteOut(query=q, resultados=[AutocompleteItemOut(**r) for r in idx.buscar(q, limit)])
+    return AutocompleteOut(query=q, resultados=[AutocompleteItemOut(**r) for r in idx.buscar(q, limit, anio=anio)])
 
 
 @app.post("/tarjeta-circulacion", response_model=TarjetaOut, dependencies=[Depends(verificar_api_key)])

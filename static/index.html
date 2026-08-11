@@ -126,9 +126,13 @@
     <div class="divider"></div>
 
     <h2>Autocompletar (demo para otro sistema)</h2>
-    <p class="foot" style="margin:-6px 0 8px">Simula el input que llenaría otra app llamando a <code>GET /autocomplete</code> en cada tecla.</p>
-    <label>Escribe marca o modelo</label>
-    <input id="autocompleteInput" type="text" placeholder="ej. coro, crv, mg5, toyota coro" autocomplete="off">
+    <p class="foot" style="margin:-6px 0 8px">Simula el flujo de otra app: primero se elige el año, luego se busca marca/modelo llamando a <code>GET /autocomplete</code> en cada tecla.</p>
+    <label>Año</label>
+    <select id="autocompleteAnio">
+      <option value="">selecciona un año...</option>
+    </select>
+    <label>Marca o modelo</label>
+    <input id="autocompleteInput" type="text" placeholder="primero selecciona el año" autocomplete="off" disabled>
     <div id="autocompleteLista" class="autocomplete-lista"></div>
     <div id="autocompleteLlamada"></div>
 
@@ -445,9 +449,61 @@ async function responder(body){
   }catch(e){ addBubble(`${pill("error red")}<div>${escapeHtml(e.message)}</div>`, "err"); }
 }
 
-// --- demo de /autocomplete: se llama con debounce en cada tecla, igual
-// que lo haría otra app llenando un input de texto. Clickear una sugerencia
-// llena Modelo/Año de arriba y dispara la consulta normal.
+// --- demo de /autocomplete, en dos pasos: primero año (selector, GET
+// /anios), despues marca/modelo con debounce en cada tecla filtrado a ese
+// año (GET /autocomplete?anio=...). Clickear una sugerencia llena
+// Modelo/Año de arriba y dispara la consulta normal.
+let aniosCargados = false;
+
+async function cargarAnios(){
+  const tablotaId = $("tablotaId").value.trim() || "default";
+  const url = $("baseUrl").value.replace(/\/$/,"") + `/anios?tablota_id=${encodeURIComponent(tablotaId)}`;
+  const hdrs = headers(false);
+  $("autocompleteAnio").innerHTML = `<option value="">cargando...</option>`;
+  try{
+    const r = await fetch(url, {method:"GET", headers: hdrs});
+    const respText = await r.text();
+    let d; try{ d = JSON.parse(respText); }catch(e){ d = null; }
+    if (!r.ok){
+      $("autocompleteAnio").innerHTML = `<option value="">error ${r.status}: ${escapeHtml((d && d.detail) || respText)}</option>`;
+      return;
+    }
+    const anios = (d && d.anios) || [];
+    $("autocompleteAnio").innerHTML = `<option value="">selecciona un año...</option>`
+      + anios.map(a => `<option value="${escapeAttr(a)}">${escapeHtml(a)}</option>`).join("");
+    aniosCargados = true;
+  }catch(e){
+    $("autocompleteAnio").innerHTML = `<option value="">error de red</option>`;
+  }
+}
+
+$("autocompleteAnio").addEventListener("focus", () => { if (!aniosCargados) cargarAnios(); });
+
+$("tablotaId").addEventListener("change", () => {
+  aniosCargados = false;
+  $("autocompleteAnio").innerHTML = `<option value="">selecciona un año...</option>`;
+  $("autocompleteInput").value = "";
+  $("autocompleteInput").disabled = true;
+  $("autocompleteInput").placeholder = "primero selecciona el año";
+  $("autocompleteLista").innerHTML = "";
+  $("autocompleteLlamada").innerHTML = "";
+});
+
+$("autocompleteAnio").addEventListener("change", () => {
+  const anio = $("autocompleteAnio").value;
+  $("autocompleteInput").value = "";
+  $("autocompleteLista").innerHTML = "";
+  $("autocompleteLlamada").innerHTML = "";
+  if (anio){
+    $("autocompleteInput").disabled = false;
+    $("autocompleteInput").placeholder = "ej. coro, crv, mg5";
+    $("autocompleteInput").focus();
+  } else {
+    $("autocompleteInput").disabled = true;
+    $("autocompleteInput").placeholder = "primero selecciona el año";
+  }
+});
+
 let autocompleteTimer = null;
 $("autocompleteInput").addEventListener("input", () => {
   clearTimeout(autocompleteTimer);
@@ -458,8 +514,10 @@ $("autocompleteInput").addEventListener("input", () => {
 
 async function buscarAutocomplete(q){
   const tablotaId = $("tablotaId").value.trim() || "default";
-  const url = $("baseUrl").value.replace(/\/$/,"") + "/autocomplete"
+  const anio = $("autocompleteAnio").value;
+  let url = $("baseUrl").value.replace(/\/$/,"") + "/autocomplete"
     + `?q=${encodeURIComponent(q)}&limit=8&tablota_id=${encodeURIComponent(tablotaId)}`;
+  if (anio) url += `&anio=${encodeURIComponent(anio)}`;
   const hdrs = headers(false);
 
   try{

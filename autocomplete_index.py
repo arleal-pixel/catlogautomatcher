@@ -32,7 +32,7 @@ para mandarse directo a /consulta sin ambiguedad.
 """
 import re
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from discriminador import normalizar
 
@@ -113,10 +113,13 @@ class IndiceAutocomplete:
                     self._bucket2[k].append(i)
                     claves_vistas.add(k)
 
-    def buscar(self, texto: str, limit: int = 10) -> List[dict]:
+    def buscar(self, texto: str, limit: int = 10, anio: Optional[str] = None) -> List[dict]:
         """Prefijo primero (el texto matchea el inicio de CUALQUIER ancla
         del label -- ver docstring del modulo), y si sobra espacio hasta
-        `limit` se completa con matches por substring en cualquier parte."""
+        `limit` se completa con matches por substring en cualquier parte.
+
+        Si se pasa `anio`, restringe los resultados a ese año -- pensado
+        para un flujo de dos pasos (año primero, despues marca/modelo)."""
         q = normalizar(texto)
         if not q:
             return []
@@ -134,8 +137,11 @@ class IndiceAutocomplete:
         prefijo: List[dict] = []
         vistos_idx = set()
         for i in candidatos:
+            e = self._entradas[i]
+            if anio is not None and e["anio"] != anio:
+                continue
             if any(a.startswith(q_compacto) for a in self._anclas[i]):
-                prefijo.append(self._entradas[i])
+                prefijo.append(e)
                 vistos_idx.add(i)
                 if len(prefijo) >= limit:
                     break
@@ -145,6 +151,8 @@ class IndiceAutocomplete:
         if faltan > 0:
             for i, e in enumerate(self._entradas):
                 if i in vistos_idx:
+                    continue
+                if anio is not None and e["anio"] != anio:
                     continue
                 if q_compacto in e["_compacto"]:
                     resultado.append(e)
