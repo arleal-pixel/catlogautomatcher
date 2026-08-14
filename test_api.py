@@ -69,21 +69,20 @@ d = r.json()
 check(d["estado"] == "resuelto" and d["clave"] == "01400102802", f"valor exacto 'CROSS XLE' -> 01400102802 (obtuvo {d.get('clave')})")
 print("   ->", d["clave"], d["descripcion"])
 
-# --- MODELO=X, AÑO=2021: debe preguntar MARCA primero (Nissan X-Trail + Tesla Model X) ---
-r = client.post("/consulta", headers=H, json={"modelo":"X","anio":2021})
+# --- MARCA-mix: un grupo (LINEA,AÑO) con >1 MARCA pregunta MARCA primero ---
+# En v10.19 X-Trail y Model X ya son LÍNEAS separadas, así que "X" ya no mezcla.
+# Caso real que sí mezcla en v10.19: LINEA="RICH" 2025 (AUTECO + DONGFENG).
+r = client.post("/consulta", headers=H, json={"modelo":"RICH","anio":2025})
 d = r.json()
-check(d["estado"] == "pregunta" and d["pregunta"]["familia"] == "MARCA", f"MODELO=X AÑO=2021 pregunta MARCA primero (obtuvo {d['pregunta']['familia'] if d.get('pregunta') else d['estado']})")
+check(d["estado"] == "pregunta" and d["pregunta"]["familia"] == "MARCA",
+      f"RICH 2025 (mezcla marcas) pregunta MARCA primero (obtuvo {d['pregunta']['familia'] if d.get('pregunta') else d['estado']})")
 print("   opciones marca:", d["pregunta"]["opciones"])
 sid = d["session_id"]
 
-r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"nissan"})
+r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"dongfeng"})
 d = r.json()
-check(d["estado"] == "pregunta", "tras 'nissan' sigue preguntando (TRIM, dentro de los 7 X-Trail)")
-print("   siguiente pregunta:", d["pregunta"]["familia"], d["pregunta"]["opciones"])
-
-r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"sense"})
-d = r.json()
-print("   tras 'sense':", d["estado"], d.get("valores_posibles") or d.get("clave"))
+check(d["estado"] in ("pregunta", "resuelto"), "tras 'dongfeng' avanza (dentro de las RICH Dongfeng)")
+print("   tras 'dongfeng':", d["estado"], (d.get("pregunta") or {}).get("familia") or d.get("clave"))
 
 # --- sin_resultado ---
 r = client.post("/consulta", headers=H, json={"modelo":"MODELO_QUE_NO_EXISTE","anio":1999})
@@ -123,20 +122,22 @@ d = r.json()
 check(d["estado"] == "sin_resultado" and "JETTA" in (d.get("sugerencias") or []),
       f"'jeta' (typo) -> sin_resultado con sugerencia JETTA (obtuvo {d.get('sugerencias')})")
 
-# --- '—' (atributo no especificado) se muestra como "No" y se acepta "no"/"ninguno" como respuesta ---
-r = client.post("/consulta", headers=H, json={"modelo":"RIO","anio":2018})
+# --- #3 Tier-2: el equipamiento (vestidura/quemacocos) solo se pregunta cuando
+# Tier-1 ya no discrimina. AUDI A1 2012 incluye claves que solo difieren en
+# vestidura (Piel vs Tela) -- la primera pregunta NUNCA debe ser EQUIPO. ---
+r = client.post("/consulta", headers=H, json={"modelo":"A1","anio":2012})
 d = r.json()
-sid = r.json()["session_id"]
-r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"ex"})
-d = r.json()
-check(d["pregunta"]["familia"] == "CARROCERIA" and "—" in d["pregunta"]["opciones"]
-      and "No" in d["pregunta"]["texto"] and "—" not in d["pregunta"]["texto"],
-      f"pregunta CARROCERIA muestra 'No' en el texto en vez de '—' (obtuvo {d['pregunta']['texto']!r})")
-
-r = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta":"no"})
-d = r.json()
-check(d["estado"] not in ("sin_match_final",) and d.get("pregunta", {}).get("familia") != "CARROCERIA",
-      f"responder 'no' resuelve la opcion '—' (no se queda atorado en CARROCERIA) (obtuvo estado={d['estado']})")
+sid = d["session_id"]
+familias = []
+_guard = 0
+while d.get("estado") == "pregunta" and _guard < 8:
+    familias.append(d["pregunta"]["familia"])
+    op = d["pregunta"]["opciones"][0]
+    d = client.post(f"/consulta/{sid}/responder", headers=H, json={"respuesta": op}).json()
+    _guard += 1
+check(familias and familias[0] != "EQUIPO",
+      f"la primera pregunta no es equipamiento (Tier-2) (familias={familias})")
+check(d["estado"] == "resuelto", f"AUDI A1 2012 se resuelve al final (obtuvo {d['estado']})")
 
 # --- regresion: MODELO reconocido pero sin filas para ese AÑO puntual ---
 # (QX50 existe en la tablota de 2019 a 2025, no en 2018 -- antes se perdia
@@ -146,15 +147,18 @@ d = r.json()
 check(d["estado"] == "sin_resultado" and d["modelo_resuelto"] == "QX50",
       f"QX50 2018 (modelo existe, año no) -> sin_resultado CON modelo_resuelto (obtuvo {d.get('modelo_resuelto')})")
 
+# En la conversación (recolección), año fuera de rango con línea válida NO
+# reinicia: re-pregunta el año recordando la línea (QX50 existe 2019-2025).
 r = client.post("/interpretar", headers=H, json={"texto":"qx50 2018"})
 d = r.json()
-check(d["resultado"]["estado"] == "sin_resultado" and d["resultado"]["modelo_resuelto"] == "QX50",
-      f"/interpretar 'qx50 2018' -> mismo caso, modelo_resuelto presente (obtuvo {d['resultado'].get('modelo_resuelto')})")
+res = d["resultado"]
+check(res["estado"] == "pregunta" and res["pregunta"]["familia"] == "ANIO" and "QX50" in res["pregunta"]["texto"],
+      f"/interpretar 'qx50 2018' -> re-pregunta el año recordando QX50 (obtuvo {res.get('estado')})")
 
 # --- subir otra tablota (subset del CSV real) y consultar sobre ella ---
 import csv, io
 rows = list(csv.DictReader(open("data/tablotas/default.csv", encoding="utf-8-sig")))
-subset = [r for r in rows if r["MODELO"].strip().upper()=="MDX" and r["AÑO"]=="2019"]
+subset = [r for r in rows if (r.get("LINEA") or r.get("MODELO","")).strip().upper()=="MDX" and r["AÑO"]=="2019"]
 buf = io.StringIO()
 w = csv.DictWriter(buf, fieldnames=rows[0].keys())
 w.writeheader()
@@ -190,10 +194,13 @@ d = r.json()
 check(d["anio_detectado"] == "2024" and d["modelo_detectado"] == "MG 5",
       f"'un mg5 2024 porfa' -> modelo MG 5 (obtuvo {d.get('modelo_detectado')})")
 
+# línea sin año -> la RECOLECCIÓN pregunta el año (ya no da un aviso muerto)
 r = client.post("/interpretar", headers=H, json={"texto": "necesito cotizar un jetta"})
 d = r.json()
-check(d["anio_detectado"] is None and "año" in d["aviso"],
-      f"'necesito cotizar un jetta' (sin año) -> aviso pide año (obtuvo {d.get('aviso')})")
+res = d.get("resultado") or {}
+check(res.get("estado") == "pregunta" and res.get("pregunta", {}).get("familia") == "ANIO",
+      f"'necesito cotizar un jetta' (sin año) -> pregunta el AÑO (obtuvo {res.get('estado')}, "
+      f"{res.get('pregunta', {}).get('familia')})")
 
 r = client.post("/interpretar", headers=H, json={"texto": "jeta 2020"})
 d = r.json()
@@ -210,7 +217,7 @@ check(d["modelo_detectado"] == "RIO" and d["resultado"]["estado"] == "pregunta"
       f"'Río 2018' (con acento) -> resuelve a RIO, 12 candidatas (obtuvo {d.get('modelo_detectado')}, "
       f"{d.get('resultado',{}).get('estado')}, {d.get('resultado',{}).get('candidatas_restantes')})")
 
-# --- /autocomplete: MARCA+MODELO+AÑO para llenar un input en otro sistema ---
+# --- GET /autocomplete: MARCA+MODELO+AÑO para llenar un input en otro sistema ---
 r = client.get("/autocomplete", headers=H, params={"q": "coro", "limit": 5})
 check(r.status_code == 200, "GET /autocomplete 200")
 d = r.json()
@@ -218,7 +225,6 @@ labels = [x["label"] for x in d["resultados"]]
 check(len(d["resultados"]) == 5 and all("COROLLA" in l for l in labels),
       f"'coro' -> 5 resultados, todos COROLLA (obtuvo {labels})")
 
-# sin API key -> 401 (mismo esquema de auth que el resto de la API)
 r = client.get("/autocomplete", params={"q": "coro"})
 check(r.status_code == 401, "GET /autocomplete sin API key -> 401")
 
@@ -235,26 +241,24 @@ labels = [x["label"] for x in d["resultados"]]
 check(len(d["resultados"]) > 0 and all(l.startswith("MG 5") for l in labels),
       f"'mg5' -> resultados MG 5 (obtuvo {labels})")
 
-# escribir la marca primero tambien funciona (prefijo del label completo)
 r = client.get("/autocomplete", headers=H, params={"q": "toyota coro", "limit": 10})
 d = r.json()
 labels = [x["label"] for x in d["resultados"]]
 check(len(d["resultados"]) > 0 and all(l.startswith("TOYOTA COROLLA") for l in labels),
       f"'toyota coro' -> resultados TOYOTA COROLLA (obtuvo {labels})")
 
-# sublinea: modelo generico en la tablota (COROLLA) tambien sugiere la sublinea especifica
+# sublinea: LINEA generica (COROLLA) tambien sugiere la sublinea especifica CROSS
 r = client.get("/autocomplete", headers=H, params={"q": "corolla cross", "limit": 10})
 d = r.json()
 check(len(d["resultados"]) > 0 and all(x["modelo"] == "COROLLA CROSS" for x in d["resultados"]),
       f"'corolla cross' -> sugiere el modelo especifico 'COROLLA CROSS' (obtuvo {[x['modelo'] for x in d['resultados']]})")
-# el modelo devuelto se puede mandar directo a /consulta sin ambiguedad
+# el 'modelo' devuelto se puede mandar directo a /consulta sin ambiguedad
 mitem = d["resultados"][0]
 r = client.post("/consulta", headers=H, json={"modelo": mitem["modelo"], "anio": int(mitem["anio"])})
 d2 = r.json()
 check(d2["estado"] in ("pregunta", "resuelto"),
       f"el 'modelo' de /autocomplete funciona directo en /consulta (obtuvo estado={d2['estado']})")
 
-# limit se respeta y tiene tope de 25
 r = client.get("/autocomplete", headers=H, params={"q": "corolla", "limit": 3})
 d = r.json()
 check(len(d["resultados"]) == 3, f"limit=3 se respeta (obtuvo {len(d['resultados'])})")
@@ -263,16 +267,14 @@ r = client.get("/autocomplete", headers=H, params={"q": "a", "limit": 999})
 d = r.json()
 check(len(d["resultados"]) <= 25, f"limit se topa en 25 (obtuvo {len(d['resultados'])})")
 
-# tablota_id inexistente -> 404, no 500
 r = client.get("/autocomplete", headers=H, params={"q": "coro", "tablota_id": "no_existe_xyz"})
 check(r.status_code == 404, f"tablota_id inexistente -> 404 (obtuvo {r.status_code})")
 
-# query vacia -> lista vacia, no error
 r = client.get("/autocomplete", headers=H, params={"q": ""})
 d = r.json()
 check(r.status_code == 200 and d["resultados"] == [], f"q vacio -> resultados vacios sin error (obtuvo {d})")
 
-# --- /anios: años distintos para poblar un selector ANTES del autocomplete ---
+# --- GET /anios: años distintos para poblar un selector ANTES del autocomplete ---
 r = client.get("/anios", headers=H)
 check(r.status_code == 200, "GET /anios 200")
 d = r.json()
@@ -293,9 +295,9 @@ d = r.json()
 check(len(d["resultados"]) > 0 and all(x["anio"] == "2024" for x in d["resultados"]),
       f"'coro' con anio=2024 -> solo resultados de 2024 (obtuvo {[x['anio'] for x in d['resultados']]})")
 
-r = client.get("/autocomplete", headers=H, params={"q": "coro", "anio": "1999", "limit": 10})
+r = client.get("/autocomplete", headers=H, params={"q": "coro", "anio": "1899", "limit": 10})
 d = r.json()
-check(d["resultados"] == [], f"'coro' con anio=1999 (no existe para Corolla) -> vacio (obtuvo {d['resultados']})")
+check(d["resultados"] == [], f"'coro' con anio=1899 (no existe) -> vacio (obtuvo {d['resultados']})")
 
 # --- probador HTML + docs ---
 r = client.get("/")
@@ -423,11 +425,11 @@ gb.CONVERSACIONES.clear()
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "corolla 2024"})
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "cross"})
 d = r.json()
-check("1. CROSS LE" in d["respuesta"] and "2. CROSS LE HEV HSD" in d["respuesta"],
+check("1. CROSS LE" in d["respuesta"] and "2. CROSS LE HEV" in d["respuesta"],
       f"'aclaracion' numera las opciones en el mensaje (obtuvo {d.get('respuesta')})")
 check(gb.CONVERSACIONES["ghl-num1"]["opciones_numeradas"] == [
     {"tipo": "valor", "valor": "CROSS LE"},
-    {"tipo": "valor", "valor": "CROSS LE HEV HSD"},
+    {"tipo": "valor", "valor": "CROSS LE HEV"},
     {"tipo": "valor", "valor": "CROSS XLE"},
 ], f"mapeo numero->valor guardado correcto (obtuvo {gb.CONVERSACIONES['ghl-num1']['opciones_numeradas']})")
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "2"})

@@ -4,8 +4,15 @@ autocomplete (texto que escribe el usuario -> lista de vehiculos que
 matchean), sin pasar por la logica de conversacion del resto de la API.
 
 Se arma UNA vez por base de datos (igual que IndiceModelos), incluyendo
-"sublineas" derivadas de la DESCRIPCION (~19,000 entradas con la tablota
-real).
+"sublineas" derivadas de la DESCRIPCION.
+
+Nota de esquema (v10.19+/paraguas): opera sobre los alias que
+`tablota_store._canonizar_row` deja en cada fila -- `MODELO` (=LINEA, ya
+resuelta por SUBMARCA/paraguas/catch-all) y `MARCA` (=marca comercial
+efectiva, SUBMARCA si existe). No necesita tocar LINEA/DESCRIPCION_LEGIBLE
+directamente: hereda gratis todo el trabajo de canonizacion que ya hace el
+store (Tesla como marca propia, Tesla 3/S/X/Y como linea, Tesla ya no bajo
+"MODEL", pickups/paraguas resueltos, etc).
 
 El label de cada entrada es "MARCA MODELO AÑO" (ej. "HONDA CR-V 2024"), pero
 en un autocomplete real casi nadie escribe la marca primero -- lo tipico es
@@ -24,11 +31,9 @@ completo en cada tecla.
 Ademas del MODELO tal cual, deriva "sublineas" con el mismo mecanismo que
 modelo_index.IndiceModelos (pelar el MODELO del inicio de la DESCRIPCION y
 tomar el siguiente token) -- asi un MODELO demasiado grueso en la tablota
-(ej. MODELO="COROLLA" agrupa el sedan y el Corolla Cross, MODELO="X" agrupa
-Nissan X-Trail y Tesla Model X) tambien aparece como sugerencia especifica
-("TOYOTA COROLLA CROSS 2024", "NISSAN X TRAIL 2021"), no solo la version
-generica. El `modelo` que se devuelve para esas sugerencias ya viene armado
-para mandarse directo a /consulta sin ambiguedad.
+tambien aparece como sugerencia especifica, no solo la version generica. El
+`modelo` que se devuelve para esas sugerencias ya viene armado para
+mandarse directo a /consulta sin ambiguedad.
 """
 import re
 from collections import defaultdict
