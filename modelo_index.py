@@ -208,6 +208,47 @@ class IndiceModelos:
                if normalizar_modelo(ln) != mnorm and normalizar_modelo(ln) not in _PH_NORM]
         return out[:k]
 
+    def lineas_familia_bmw(self, digito: str) -> List[str]:
+        """Líneas BMW de una serie (el usuario dice «Serie 3» sin motor). BMW cataloga
+        el motor como línea; Serie N = líneas M?N## (Serie 3 → 318/320/.../M340)."""
+        c = self.lineas_marca.get(normalizar_modelo("BMW"))
+        if not c:
+            return []
+        pat = re.compile(rf"^M?{digito}\d\dL?$")
+        return sorted(ln for ln in c if pat.match(normalizar_modelo(ln)))
+
+    def lineas_familia_clase(self, marca_display: str, clase: str) -> List[str]:
+        """Líneas de una clase Mercedes (el usuario dice «Clase GLE» sin código).
+        Clase X = líneas que empiezan con X seguido de dígito (GLE → GLE300/GLE350/…;
+        C → C180/C200/… pero NO CLA/CLS/CLK)."""
+        c = self.lineas_marca.get(normalizar_modelo(marca_display))
+        if not c:
+            return []
+        cn = normalizar_modelo(clase)
+        pat = re.compile(rf"^{re.escape(cn)}\d")
+        return sorted(ln for ln in c if pat.match(normalizar_modelo(ln)))
+
+    def lineas_familia_stem(self, marca_display: str, token: str) -> List[str]:
+        """Miembros de la familia cuyo TRONCO es `token`, dicho SIN la palabra
+        Serie/Clase (ej. «BMW 3», «Mercedes GLE», «Mercedes E»). Devuelve [] si el
+        token no es un tronco de familia reconocido, para no tocar líneas normales.
+          BMW:      dígito 1-8 -> Serie N (318/…/M340) ; 'M' -> M2/M3/…/M8.
+          Mercedes: clase de <=3 letras -> GLE300/… , E200/… (excluye VITO/SPRINTER)."""
+        t = normalizar_modelo(token)
+        m = normalizar_modelo(marca_display)
+        if m == normalizar_modelo("BMW"):
+            if re.fullmatch(r"[1-8]", t):
+                return self.lineas_familia_bmw(t)
+            if t == "M":
+                c = self.lineas_marca.get(m) or []
+                return sorted(ln for ln in c if re.fullmatch(r"M[2-8]", normalizar_modelo(ln)))
+            return []
+        if m == normalizar_modelo("MERCEDES BENZ"):
+            if t.isalpha() and 1 <= len(t) <= 3:
+                return self.lineas_familia_clase(marca_display, t)
+            return []
+        return []
+
     def linea_unica_de_marca(self, marca_display: str) -> Optional[str]:
         """Si la marca tiene UNA sola LÍNEA, la devuelve (mono-modelo: SMART→SMART,
         INEOS→GRENADIER, ALPINE→A110). Sirve para resolver directo sin preguntar

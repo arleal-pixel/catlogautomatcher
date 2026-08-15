@@ -10,6 +10,46 @@ lógica del selector se mueve a operar sobre `DESCRIPCION_LEGIBLE` (ver
 
 ---
 
+## Sesión 2026-08-14 — v6.2 (fix familias BMW/Mercedes + router multi-producto)
+
+### Autos — familias «Serie N» (BMW) y «Clase X» (Mercedes)  *(fix del reporte de Armando)*
+El ejercicio de 251 vehículos reales de Armando (MercadoLibre) destapó 7 fallos,
+todos del mismo patrón: cuando el usuario da la **familia sin motor/código**
+(`BMW Serie 3`, `Mercedes Clase GLE`), el selector caía a una pregunta genérica
+que listaba un vehículo ajeno primero (X5 / Sprinter) — y el auto-selector (o un
+usuario distraído) terminaba en el vehículo equivocado.
+- **`modelo_index.py`**: `lineas_familia_bmw(digito)`, `lineas_familia_clase(marca,
+  clase)`, `lineas_familia_stem(marca, token)` — dado el tronco de familia
+  devuelven sus miembros reales.
+- **`discriminador.py`**: hooks BMW (Serie N y Serie M / «bmw m» → M2…M8) y bloque
+  Mercedes «Clase X», que disparan **con o sin** la palabra Serie/Clase
+  (`bmw 3`, `mercedes gle`, `mercedes e`). Con código (`serie 3 320i`,
+  `clase gle 350`, `mercedes c 200`) NO entran: resuelven al miembro exacto.
+- Cobertura: Serie 1–8 + Serie M; clases A/B/C/E/S/G/CLA/CLS/GLA/GLB/GLC/GLE/GLS…
+- Verificado: `test_api` 61/0, `test_mejoras_v6` 34/0 (5 tests nuevos de familia),
+  smoke 3,000 → 99.9% (solo el borde conocido STRUDER ST-2000).
+
+### Router multi-producto (Odessa)  *(nuevo)*
+El selector deja de ser solo Autos: se añadió el router conversacional de Odessa
+(«Me gustaría cotizar un seguro de:») **en el core**, sin tocar el motor de autos.
+- **`paquetes.py`** *(nuevo)*: catálogo data-driven de productos de **precio fijo**
+  (Vida, Vida y Funerarios, Vida y Cáncer, Gastos Funerarios, Mascotas) + helpers
+  puros (`resolver_menu`/`resolver_submenu`/`resolver_paquete`, `ficha_texto`, …).
+  Reconoce número o nombre; matching por coincidencia exacta primero.
+- **`main.py`**: sesión de paquete + endpoints `POST /cotizar/inicio` y
+  `POST /cotizar/{sid}/responder` (pasos router→submenu→paquetes→resuelto). Si el
+  usuario elige **Auto**, delega en el motor existente (`_procesar_texto_libre` /
+  `_procesar_respuesta`) y envuelve su salida — el motor de autos queda intacto.
+- **Datos cargados** (portal Odessa Tek): grupo Vida/Funerarios/Cáncer completo
+  (4 productos, 12 paquetes, mensual) + **Mascotas** (GMX Seguros, precio **anual**,
+  2 planes con deducibles y coberturas que difieren por plan). Casa Habitación y
+  Motocicleta **pausados** (fuera del menú; su dato queda comentado en `MENU`).
+- Modelo de paquete soporta periodicidad (mensual/anual), nota de deducible y
+  aseguradora, para productos «ricos».
+- **`test_paquetes.py`** *(nuevo)*: 29 checks del router + productos + handoff a autos.
+
+---
+
 ## Nuevo
 
 ### `filtro_genericas.py`  *(nuevo archivo)*
@@ -227,19 +267,3 @@ Verificación: suites 61/0 y 30/0, smoke test automático 8000 filas → 99.98%.
 - **Fix año-vs-modelo acumulado**: si el año guardado es igual a la línea (número
   ambiguo tipo «2008» dado suelto y luego como modelo), se limpia el año (evita
   «No tengo 2008 2008»).
-
----
-
-## Re-integración de `/autocomplete` + `/anios` (sobre v6 + TABLOTA v10.20)
-
-Puerto de la funcionalidad de autocompletado (desarrollada en paralelo, antes
-de este paquete v6) a la nueva base: `autocomplete_index.py` (nuevo archivo,
-sin cambios de lógica) + método `TablotaStore.autocomplete()` + endpoints
-`GET /autocomplete` y `GET /anios` en `main.py`. Opera sobre los alias
-MODELO/MARCA que deja `_canonizar_row` (SUBMARCA/paraguas/catch-all ya
-resueltos), así que hereda gratis toda la canonización de v6 sin tocar su
-código. Ver README, sección "Autocompletado de vehículos". Probado contra
-TABLOTA_v10_20.csv real (~22,000 combinaciones MARCA+MODELO+AÑO, bajo 1ms por
-llamada). Demo de dos pasos (año primero, luego marca/modelo) agregada al
-probador HTML (`static/index.html`). Suites: `test_api.py` (61 + 15 checks
-nuevos), `test_mejoras_v6.py` sin cambios (30/0).

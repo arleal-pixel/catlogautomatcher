@@ -195,4 +195,36 @@ r = resp(sid, respuesta="2")
 check(r["estado"] == "resuelto" and "M SPORT" not in (r.get("descripcion") or ""),
       f"'2' elige la 2a opción por número (obtuvo {r.get('estado')}, {r.get('descripcion')})")
 
+# ------------------------------------------------------------------ familia Serie/Clase
+# (bug reportado por Alejandro): 'BMW Serie 3' y 'Mercedes Clase GLE' sin motor/código
+# caían a una pregunta genérica que listaba X5 / Sprinter primero -> el usuario podía
+# terminar en un vehículo distinto. Ahora se ofrecen los MIEMBROS de esa familia.
+r = interp("bmw serie 3 2019")["resultado"]
+check(r["estado"] == "pregunta" and r["pregunta"]["familia"] == "LINEA"
+      and all(o[0] == "3" or o.startswith("M3") for o in r["pregunta"]["opciones"])
+      and not any("X5" in o for o in r["pregunta"]["opciones"]),
+      f"'BMW Serie 3' -> ofrece 318/320/.../M340, NO X5 (obtuvo {(r.get('pregunta') or {}).get('opciones')})")
+sid = r["session_id"]
+r = resp(sid, respuesta="320")
+check(r["estado"] == "resuelto" and r["descripcion"].startswith("320"),
+      f"'Serie 3'->'320' resuelve a un BMW 320 (obtuvo {r.get('descripcion')})")
+
+r = interp("mercedes benz clase gle 2019")["resultado"]
+check(r["estado"] == "pregunta" and r["pregunta"]["familia"] == "LINEA"
+      and all(o.startswith("GLE") for o in r["pregunta"]["opciones"])
+      and not any("SPRINTER" in o for o in r["pregunta"]["opciones"]),
+      f"'Clase GLE' -> ofrece GLE300/GLE350/..., NO Sprinter (obtuvo {(r.get('pregunta') or {}).get('opciones')})")
+
+# 'clase c' (sólo año, sin código) -> familia C (antes daba la línea-clase base 'C').
+r = interp("mercedes benz clase c 2018")["resultado"]
+check(r["estado"] == "pregunta" and r["pregunta"]["familia"] == "LINEA"
+      and any(o.startswith("C2") for o in r["pregunta"]["opciones"]),
+      f"'Clase C' (sólo año) -> ofrece C180/C200/... (obtuvo {(r.get('pregunta') or {}).get('opciones')})")
+
+# con código NO se intercepta: 'clase gle 350' resuelve directo a GLE350.
+r = interp("clase gle 350")["resultado"]
+check(r["estado"] == "pregunta" and r["pregunta"]["familia"] == "ANIO"
+      and "GLE350" in r["pregunta"]["texto"],
+      f"'clase gle 350' (con código) resuelve directo a GLE350 (obtuvo {(r.get('pregunta') or {}).get('texto')})")
+
 print("\n=== TODO OK (mejoras v6) ===")

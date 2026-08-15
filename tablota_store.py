@@ -209,10 +209,8 @@ class TablotaStore:
         return self._indices[tablota_id]
 
     def autocomplete(self, tablota_id: str) -> IndiceAutocomplete:
-        """Indice de autocompletado (MARCA+MODELO+AÑO unicos), construido
-        una sola vez por base de datos y cacheado. Opera sobre los alias
-        MODELO/MARCA que deja `_canonizar_row` (ya resueltos por SUBMARCA/
-        paraguas/catch-all)."""
+        """Indice de autocompletado (MARCA + MODELO + AÑO), construido una
+        sola vez por tablota y cacheado."""
         if tablota_id not in self._rows:
             raise TablotaError(f"tablota_id '{tablota_id}' no existe")
         if tablota_id not in self._autocompletes:

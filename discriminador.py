@@ -340,9 +340,22 @@ def interpretar_entrada(texto: str, indice, marca_ctx: Optional[str] = None) -> 
         if _lb:
             return {"anio": ex["anio"], "linea": _lb, "marca": "BMW",
                     "sobrantes": [], "sugerencias": [], "lineas_prefijo": []}
+        # 'serie N' sin motor -> ofrecer las líneas de ESA serie (Serie 3 ->
+        # 318/320/.../M340), no una pregunta genérica que lista un X5 primero.
+        # (NO caer al flujo normal: el '3' se iría a Mazda.)
+        _msd = re.search(r"\bSERIE\s+(\d)\b", _nt)
+        if _msd:
+            return {"anio": ex["anio"], "linea": None, "marca": "BMW",
+                    "sobrantes": [], "sugerencias": [],
+                    "lineas_prefijo": indice.lineas_familia_bmw(_msd.group(1))}
+        # 'serie m' / 'bmw m' (M sola, sin motor) -> familia M (M2/M3/.../M8), no la
+        # línea rara 'M' (M FIRST EDITION) ni una pregunta genérica.
+        if re.search(r"\bM\b", _nt):
+            _famM = indice.lineas_familia_stem("BMW", "M")
+            if len(_famM) >= 2:
+                return {"anio": ex["anio"], "linea": None, "marca": "BMW",
+                        "sobrantes": [], "sugerencias": [], "lineas_prefijo": _famM}
         if _serie:
-            # 'serie N' sin motor -> es BMW pero no sabemos la línea; preguntar modelo
-            # (NO caer al flujo normal, donde el '3' se iría a Mazda).
             return {"anio": ex["anio"], "linea": None, "marca": "BMW",
                     "sobrantes": [], "sugerencias": [], "lineas_prefijo": []}
         # _bmw sin motor (ej. 'bmw x3' ya lo tomó el resolver; 'bmw mini cooper')
@@ -457,12 +470,34 @@ def interpretar_entrada(texto: str, indice, marca_ctx: Optional[str] = None) -> 
         if _d and _d.get("tipo") == "exacto" and len(_d["modelos"]) == 1:
             linea = _d["modelos"][0]
 
+    # Familia sin código: el usuario dio el TRONCO de una familia que la tablota
+    # cataloga por miembro -> ofrecer los miembros, en vez de una pregunta genérica
+    # que lista un X5/Sprinter primero (o de resolver a una línea-tronco base). Cubre,
+    # CON o SIN la palabra Serie/Clase:
+    #   BMW      : 'serie 3' | 'bmw 3'          -> 318/320/.../M340 ; 'serie m'|'m' -> M2..M8
+    #   Mercedes : 'clase gle' | 'gle' | 'e'    -> GLE300/GLE350/... ; E200/E250/...
+    # Con código (gle 350, 320i, clase c 200) NO entra: ya resolvió a un miembro.
+    fam_clase = []
+    if marca_efectiva in ("BMW", "MERCEDES BENZ"):
+        _tiene_codigo = bool(re.search(r"(?<!\d)\d{2,3}(?!\d)", _nt))
+        if not _tiene_codigo:
+            _cands = ([linea] if linea else []) + list(sobrantes)
+            _mkw = re.search(r"\b(?:CLASE|SERIE)\s+([A-Z0-9]{1,3})\b", _nt)
+            if _mkw:
+                _cands.insert(0, _mkw.group(1))
+            for _t in _cands:
+                _f = indice.lineas_familia_stem(marca_efectiva, _t)
+                if len(_f) >= 2:
+                    fam_clase = _f
+                    linea = None   # descarta una posible línea-tronco base (ej. 'E')
+                    break
+
     # Si no hubo línea ni marca (ni de contexto), ¿el texto es un PREFIJO de
     # varias líneas? (ej. "MINI" -> MINI COOPER S / ...). Se usa para preguntar
     # cuál línea, en vez de un aviso genérico. Con marca conocida NO se hace
     # (sería un prefijo cross-marca).
-    lineas_prefijo = []
-    if not linea and not marca_efectiva:
+    lineas_prefijo = fam_clase
+    if not lineas_prefijo and not linea and not marca_efectiva:
         base = " ".join(sobrantes) if sobrantes else texto
         lineas_prefijo = indice.lineas_por_prefijo(base)
 

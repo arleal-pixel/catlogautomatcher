@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
 import discriminador as disc
+import paquetes as pq
 from tablota_store import TablotaError, store
 
 try:
@@ -931,6 +932,169 @@ def estado_sesion(session_id: str):
     if session_id not in SESIONES:
         raise HTTPException(status_code=404, detail="session_id no encontrado o expirado")
     return _evaluar(session_id)
+
+
+# ============================================================
+# Router multi-producto (Odessa): Auto + productos de PAQUETE FIJO
+# ============================================================
+# El motor de Autos NO se toca: cuando el usuario elige "Auto", este router
+# delega en el flujo existente (_procesar_texto_libre / _procesar_respuesta) y
+# envuelve su salida en la misma forma. Los demás productos son de precio fijo y
+# viven en paquetes.py (data-driven). Toda la lógica corre en el core.
+
+_CMD_MENU = {"MENU", "MENÚ", "INICIO", "REGRESAR", "VOLVER", "EMPEZAR", "COTIZAR"}
+_CMD_RESET = {"REINICIAR", "RESET", "CANCELAR"}
+
+
+class CotizarOut(BaseModel):
+    session_id: str
+    paso: Literal["router", "submenu", "paquetes", "auto", "resuelto"]
+    mensaje: str
+    opciones: Optional[List[str]] = None
+    seleccion: Optional[dict] = None
+
+
+def _nueva_sesion_cotizar(tablota_id: str = "default") -> str:
+    sid = str(uuid.uuid4())
+    SESIONES[sid] = {
+        "fase": "cotizar",
+        "tablota_id": tablota_id,
+        "paso": "router",
+        "grupo": None,      # entrada de MENU del grupo (cuando paso == submenu)
+        "prod_id": None,    # producto hoja elegido
+        "auto_sid": None,   # sesión delegada del motor de autos
+        "historial": [],
+        "creado": datetime.now(timezone.utc).isoformat(),
+    }
+    return sid
+
+
+def _co(sid, paso, mensaje, opciones=None, seleccion=None):
+    ses = SESIONES[sid]
+    ses["paso"] = paso
+    return CotizarOut(session_id=sid, paso=paso, mensaje=mensaje,
+                      opciones=opciones, seleccion=seleccion)
+
+
+def _router_menu(sid, prefijo=""):
+    return _co(sid, "router", (prefijo + pq.menu_texto()).strip(),
+               opciones=pq.menu_opciones())
+
+
+def _render_auto(sid, res: "ResultadoOut"):
+    """Envuelve la salida del motor de autos (ResultadoOut) en la forma del router."""
+    if res.estado == "resuelto":
+        msg = f"✅ {res.descripcion}\nCLAVE: {res.clave}"
+        sel = {"tipo": "auto", "clave": res.clave, "descripcion": res.descripcion}
+        return _co(sid, "resuelto", msg, seleccion=sel)
+    if res.estado in ("sin_resultado",):
+        return _co(sid, "auto", "No encontré ese vehículo. Dime marca, modelo y año "
+                                "(ej. «Nissan Sentra 2019»), o escribe «menú».")
+    # pregunta / aclaracion / ambiguo / sin_match_final -> mostrar la pregunta
+    if res.pregunta is not None:
+        return _co(sid, "auto", res.pregunta.texto,
+                   opciones=(res.pregunta.opciones or None))
+    return _co(sid, "auto", "¿Me das más datos del vehículo? O escribe «menú».")
+
+
+def _paso_auto(sid, texto):
+    """Delegación al motor de autos dentro de la sesión del router."""
+    ses = SESIONES[sid]
+    if ses.get("auto_sid") and ses["auto_sid"] in SESIONES:
+        res = _procesar_respuesta(ses["auto_sid"], respuesta=texto)
+        return _render_auto(sid, res)
+    # aún no hay sesión de autos: interpretar el texto libre para arrancarla
+    out = _procesar_texto_libre(texto, ses["tablota_id"])
+    if out.resultado is not None:
+        ses["auto_sid"] = out.resultado.session_id
+        return _render_auto(sid, out.resultado)
+    # no se identificó vehículo todavía (aviso/guía): seguir en modo auto
+    return _co(sid, "auto", out.aviso or "Dime marca, modelo y año del auto.")
+
+
+def _entrar_producto(sid, prod_id):
+    """Pasa a listar los paquetes de un producto hoja (o stub si no hay planes)."""
+    ses = SESIONES[sid]
+    ses["prod_id"] = prod_id
+    if pq.tiene_paquetes(prod_id):
+        return _co(sid, "paquetes", pq.paquetes_texto(prod_id),
+                   opciones=pq.paquetes_opciones(prod_id))
+    # sin planes cargados -> stub honesto y de vuelta al router
+    return _co(sid, "router", pq.paquetes_texto(prod_id), opciones=pq.menu_opciones())
+
+
+def _responder_cotizar(sid, texto):
+    ses = SESIONES.get(sid)
+    if not ses or ses.get("fase") != "cotizar":
+        raise HTTPException(status_code=404, detail="session_id no encontrado o expirado")
+    t = disc.normalizar(texto or "")
+
+    # comandos globales
+    if t in _CMD_RESET or (t in _CMD_MENU and ses["paso"] != "router"):
+        ses.update(grupo=None, prod_id=None, auto_sid=None)
+        return _router_menu(sid)
+
+    paso = ses["paso"]
+
+    if paso == "auto":
+        return _paso_auto(sid, texto)
+
+    if paso == "router":
+        m = pq.resolver_menu(texto)
+        if not m:
+            return _router_menu(sid, "No te entendí. ")
+        if m["tipo"] == "auto":
+            ses["auto_sid"] = None
+            return _co(sid, "auto", BIENVENIDAS["auto"])
+        if m["tipo"] == "grupo":
+            ses["grupo"] = m
+            return _co(sid, "submenu", pq.submenu_texto(m),
+                       opciones=pq.submenu_opciones(m))
+        return _entrar_producto(sid, m["prod"])   # paquete directo (casa/moto/mascotas)
+
+    if paso == "submenu":
+        prod = pq.resolver_submenu(ses["grupo"], texto)
+        if not prod:
+            return _co(sid, "submenu", "No te entendí. " + pq.submenu_texto(ses["grupo"]),
+                       opciones=pq.submenu_opciones(ses["grupo"]))
+        return _entrar_producto(sid, prod)
+
+    if paso == "paquetes":
+        pk = pq.resolver_paquete(ses["prod_id"], texto)
+        if not pk:
+            return _co(sid, "paquetes", "No te entendí. " + pq.paquetes_texto(ses["prod_id"]),
+                       opciones=pq.paquetes_opciones(ses["prod_id"]))
+        return _co(sid, "resuelto", pq.ficha_texto(ses["prod_id"], pk),
+                   seleccion=pq.seleccion_dict(ses["prod_id"], pk))
+
+    # paso == "resuelto": ya eligió; ofrecer cotizar otro
+    return _co(sid, "resuelto",
+               "Ya tienes tu selección. Escribe «menú» para cotizar otro producto.")
+
+
+class CotizarInicioIn(BaseModel):
+    tablota_id: str = "default"
+
+
+@app.post("/cotizar/inicio", response_model=CotizarOut,
+          dependencies=[Depends(verificar_api_key)])
+def cotizar_inicio(body: CotizarInicioIn):
+    """Arranca el router multi-producto: crea sesión y muestra el menú de productos
+    (Auto · Vida/Funerarios/Cáncer · Casa · Moto · Mascotas)."""
+    sid = _nueva_sesion_cotizar(body.tablota_id)
+    return _router_menu(sid)
+
+
+class CotizarResponderIn(BaseModel):
+    texto: str
+
+
+@app.post("/cotizar/{session_id}/responder", response_model=CotizarOut,
+          dependencies=[Depends(verificar_api_key)])
+def cotizar_responder(session_id: str, body: CotizarResponderIn):
+    """Avanza el router: selecciona producto -> (sub-producto) -> paquete -> ficha,
+    o delega en el motor de autos si el usuario eligió «Auto»."""
+    return _responder_cotizar(session_id, body.texto)
 
 
 def _extraer_campo(data: dict, *claves: str) -> Optional[str]:
