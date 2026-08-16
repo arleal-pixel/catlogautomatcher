@@ -373,8 +373,48 @@ check(d["contact_id"] == "ghl-c3" and "ghl-c3" not in gb.CONVERSACIONES,
       f"/cotizador-auto/webhook limpia la fase 'esperando_cotizacion' del contacto (obtuvo {d}, "
       f"quedo={gb.CONVERSACIONES.get('ghl-c3')})")
 # ok=False es esperado aqui: no hay GHL_API_TOKEN en este entorno de pruebas,
-# asi que actualizar_custom_fields/agregar_tag fallan -- lo que importa es que
-# no tumbo el proceso y limpio el estado local igual.
+# asi que actualizar_registro_cotizacion/agregar_tag fallan -- lo que importa
+# es que no tumbo el proceso y limpio el estado local igual.
+
+# --- reutilizar datos del conductor si ya cotizo antes (evita re-preguntar) ---
+# obtener_datos_conductor() normalmente lee esto del Custom Object en GHL
+# (chatbotprinciap); en pruebas se mockea igual que enviar_whatsapp, ya que
+# aqui no hay cuenta real de GHL de la que leer.
+datos_guardados = {"nombre": "Ana Ejemplo", "edad": 40, "codigo_postal": "01000"}
+gb.obtener_datos_conductor = lambda contact_id: dict(datos_guardados)
+gb.CONVERSACIONES.clear()
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-repetido", "mensaje": "corolla cross 2024"})
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-repetido", "mensaje": "xle"})
+d = r.json()
+check(gb.CONVERSACIONES.get("ghl-repetido", {}).get("fase") == "confirmar_datos_conductor"
+      and "Ana Ejemplo" in d["respuesta"] and "40" in d["respuesta"],
+      f"con datos guardados de antes, los confirma en vez de re-pedirlos (obtuvo {d})")
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-repetido", "mensaje": "si"})
+d = r.json()
+check(d["ok"] and "ya tengo todos tus datos" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-repetido", {}).get("fase") == "esperando_cotizacion",
+      f"confirmar con 'si' cotiza directo sin re-pedir nada (obtuvo {d})")
+
+# cambiar solo un campo (edad) sin perder nombre/CP ya confirmados
+gb.CONVERSACIONES.clear()
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-cambia-edad", "mensaje": "corolla cross 2024"})
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-cambia-edad", "mensaje": "xle"})
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-cambia-edad", "mensaje": "quiero cambiar mi edad"})
+d = r.json()
+check(gb.CONVERSACIONES.get("ghl-cambia-edad", {}).get("editar_uno") is True
+      and gb.CONVERSACIONES["ghl-cambia-edad"]["paso"] == "edad"
+      and "edad" in d["respuesta"].lower(),
+      f"pedir cambiar la edad solo pide ese campo (obtuvo {d}, quedo={gb.CONVERSACIONES.get('ghl-cambia-edad')})")
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-cambia-edad", "mensaje": "41"})
+d = r.json()
+check(d["ok"] and "ya tengo todos tus datos" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-cambia-edad", {}).get("fase") == "esperando_cotizacion",
+      f"cambiar solo edad finaliza directo sin re-pedir nombre/CP (obtuvo {d})")
+
+gb.obtener_datos_conductor = lambda contact_id: None  # deja el mock neutro para el resto de pruebas
 
 r = client.post("/cotizador-auto/webhook", json={"contact_id": "ghl-sin-resultado"})
 d = r.json()

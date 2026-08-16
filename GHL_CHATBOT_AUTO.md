@@ -177,11 +177,16 @@ conversación **no termine** — sigue pidiendo:
 Al completarse los tres, **el contacto NO queda listo para agendar
 todavía**. En vez de eso:
 
-1. Guarda `vehiculo_clave`, `vehiculo_descripcion`, `conductor_nombre`,
-   `conductor_edad`, `conductor_codigo_postal` como Custom Fields del
-   contacto (`actualizar_custom_fields`) — **créalos primero** en
-   Configuración → Custom Fields con esos mismos nombres, o ajusta el dict
-   `CAMPOS_GHL` al inicio de `ghl_bridge.py` con los IDs/keys reales.
+1. Crea un registro **nuevo** en el Custom Object `chatbotprinciap`
+   (`crear_registro_cotizacion`) con `vehiculo_clave`, `conductor_nombre`,
+   `conductor_edad`, `conductor_codigo_postal` y el contacto asociado vía
+   el campo de texto `contacto` (ahí se guarda el `contactId` de GHL). Se
+   crea uno nuevo por cada cotización a propósito, para conservar el
+   historial completo de autos que cotizó cada cliente — el objeto y sus
+   campos ya existen en tu cuenta (confirmado en vivo contra la API real),
+   no hace falta crear nada en el panel de GHL para esto. Si algún día
+   cambias el `key` del objeto, ajusta `GHL_OBJETO_SCHEMA_KEY` al inicio de
+   `ghl_bridge.py` (por defecto `custom_objects.chatbotprinciap`).
 2. Manda la solicitud a tu futura API de cotización (`enviar_a_cotizar`) —
    **no espera el precio de vuelta ahí mismo**: le manda también una
    `callback_url` (tu propia API, ver más abajo) para que esa API te avise
@@ -197,6 +202,31 @@ todavía**. En vez de eso:
    `COTIZADOR_AUTO_CALLBACK_URL` (esta última = tu propia URL pública +
    `/cotizador-auto/webhook`, ver Parte C2).
 
+### C1b — Si el cliente ya cotizó antes, no le repite las preguntas
+
+Antes de pedir nombre/edad/CP, el puente intenta leer esos datos de una
+cotización anterior (`obtener_datos_conductor`, busca en el Custom Object
+`chatbotprinciap` el registro más reciente de ese `contactId` vía
+`buscar_registro_conductor`). Si los encuentra, en vez de volver a
+preguntarlos uno por uno, los confirma de un jalón:
+
+> "Ya tengo tus datos de antes: *Ana Ejemplo*, 40 años, CP 01000. ¿Sigue
+> igual? Responde "sí" para continuar, o dime qué quieres cambiar (nombre,
+> edad o código postal)."
+
+- Responder afirmativo → cotiza directo con esos datos (no repite nada).
+- Mencionar "nombre"/"edad"/"código postal"/"CP" → pide solo ese campo y
+  cotiza con el resto sin tocar.
+- Cualquier otra cosa → por seguridad, vuelve a pedir los tres desde cero.
+
+Así el mismo cliente puede cotizar varios vehículos seguidos sin repetir
+sus datos personales cada vez — solo confirma o corrige.
+
+**Limitación conocida (POC):** si pide cambiar más de un campo en el mismo
+mensaje (ej. "cambia mi nombre y mi CP"), solo toma el primero que
+detecta (nombre > edad > CP, en ese orden) y cotiza con ese cambio nada
+más — para cambiar varios, hay que hacerlo uno a la vez.
+
 ### C2 — El webhook que recibe el resultado: `POST /cotizador-auto/webhook`
 
 Ya agregué este endpoint en `main.py` — es el que tu futura API de
@@ -207,10 +237,14 @@ cotización debe llamar cuando termine:
 ```
 
 Al recibirlo:
-- Guarda `resultado` (tal cual, como JSON) en el Custom Field
-  `auto_cotizacion_resultado` — ajusta esto cuando conozcas el contrato
-  real de tu API (por ejemplo, separar precio/cobertura en sus propios
-  Custom Fields en vez de un JSON crudo).
+- Guarda `resultado` (tal cual, como JSON) en la propiedad
+  `auto_cotizacion_resultado` (LARGE_TEXT) del registro de esa cotización
+  en el Custom Object — ajusta esto cuando conozcas el contrato real de tu
+  API (por ejemplo, separar precio/cobertura en sus propias propiedades en
+  vez de un JSON crudo). Actualiza el registro que se creó al terminar de
+  recolectar los datos del conductor (`REGISTROS_ACTIVOS`); si el proceso
+  se reinició mientras tanto y se perdió esa referencia en memoria, busca
+  el registro más reciente de ese contacto como respaldo.
 - **Ahí sí** agrega el tag `auto-listo-para-agendar` (`agregar_tag`) — este
   es el que dispara el workflow "Auto - Reactivar y Agendar" (Parte D).
 - Limpia la fase `esperando_cotizacion` localmente.
@@ -231,14 +265,19 @@ inválido (se re-pregunta) → CP válido (pasa a "esperando cotización") →
 mensaje durante la espera (no se reinterpreta) → callback de
 `/cotizador-auto/webhook` (limpia la fase local).
 
-**Nota honesta:** no pude probar `actualizar_custom_fields`/`agregar_tag`
-contra tu cuenta real de GHL — la forma exacta del payload de `customFields`
-en la API v2 puede variar según cómo tengas configurados esos campos.
-Pruébalo primero con un contacto de prueba y revisa el código de respuesta.
-Tampoco existe todavía tu API de cotización real, así que `enviar_a_cotizar`
-no se ha probado contra un endpoint de verdad — cuando la tengas, prueba
-primero con `curl` directo a `/cotizador-auto/webhook` simulando su
-callback, antes de conectarlo de punta a punta.
+**Nota honesta:** los endpoints de la API de Custom Objects
+(crear/buscar/actualizar registro) están confirmados contra la
+documentación real de GHL y contra el schema real de tu objeto
+`chatbotprinciap` (consulté `GET /objects/custom_objects.chatbotprinciap`
+en vivo), pero **no se han probado en producción creando/actualizando un
+registro de verdad todavía** — antes de conectar el flujo completo, prueba
+con un contacto de prueba por WhatsApp y confirma en el panel de GHL
+(Contactos → ese contacto → pestaña de objetos asociados, o directo en el
+listado del Custom Object) que el registro se crea con los datos
+correctos. Tampoco existe todavía tu API de cotización real, así que
+`enviar_a_cotizar` no se ha probado contra un endpoint de verdad — cuando
+la tengas, prueba primero con `curl` directo a `/cotizador-auto/webhook`
+simulando su callback, antes de conectarlo de punta a punta.
 
 ## Parte D — Workflow "Auto - Reactivar y Agendar"
 
@@ -260,8 +299,15 @@ callback, antes de conectarlo de punta a punta.
 
 - [ ] Crear los tags: `modo-auto-cotizando`, `auto-listo-para-agendar`,
       `trigger-interno-no-usar` (o los nombres que prefieras).
-- [ ] Crear los Custom Fields en GHL con los nombres de `CAMPOS_GHL` (o
-      editar el dict con los reales).
+- [ ] Confirmar que el Private Integration Token (`GHL_API_TOKEN`) tiene
+      habilitados los scopes de Objects: `objects/schema.readonly`,
+      `objects/record.write`, `objects/record.readonly` — sin esto, todas
+      las llamadas al Custom Object fallan con 401 "not authorized for
+      this scope" (editar la Private Integration existente en Settings →
+      Private Integrations, no hace falta generar un token nuevo).
+- [ ] Confirmar `GHL_LOCATION_ID` está configurado en Railway — la API de
+      Custom Objects lo requiere en cada llamada (a diferencia de otras
+      APIs de GHL que lo infieren del token).
 - [ ] Publicar B1 ("Auto - Activar Puente") antes de configurar la acción
       "Trigger a Workflow" del bot (el dropdown solo lista workflows ya
       publicados).
@@ -280,6 +326,43 @@ callback, antes de conectarlo de punta a punta.
       `COTIZADOR_AUTO_WEBHOOK_SECRET`) — no hace falta tocar código.
 - [ ] Probar `/cotizador-auto/webhook` con un `curl` simulando el callback
       antes de conectar la API real de punta a punta.
+
+## Troubleshooting: llegan dos respuestas distintas al mismo mensaje
+
+Si ves algo así en WhatsApp:
+
+```
+Perfecto, Armando. ¿Cuál es tu edad?
+¿Cuál es tu edad?
+```
+
+La segunda línea (`¿Cuál es tu edad?`, seca) es el texto exacto que manda
+nuestro código (`_PREGUNTAS_CONDUCTOR["edad"]`). La primera
+(`"Perfecto, Armando. ¿Cuál es tu edad?"`) **no sale de nuestro código en
+ningún lado** — ese tono es típico de una respuesta generada por el LLM
+del bot nativo de Conversation AI. Es decir: el bot sigue activo y
+contestando en paralelo al mismo tiempo que el workflow B2 (`/ghl/webhook`).
+
+Esto es exactamente el problema que la Parte B1 está diseñada para
+evitar. Revisa, en orden:
+
+1. ¿El workflow **`Auto - Activar Puente`** (B1) está *publicado* y
+   realmente conectado en la acción "Trigger a Workflow" del bot (Parte
+   A)? Si el dropdown no lo encontró o quedó sin guardar, el bot nunca lo
+   dispara.
+2. Dentro de B1, ¿la acción **"Update Conversation AI Bot and Status" →
+   Inactive** de verdad está ahí y corrió? Puedes confirmarlo en el
+   historial de ejecución del workflow (Automation → Workflows → Auto -
+   Activar Puente → History) — busca la ejecución de ese contacto y
+   revisa que esa acción no haya fallado.
+3. Como diagnóstico rápido: abre el contacto de prueba en GHL y revisa su
+   estado de IA (algunas cuentas lo muestran en el panel del contacto,
+   sección Conversation AI) — debería decir `Inactive` mientras está en
+   medio de la cotización de auto.
+
+Mientras el bot siga activo en paralelo, vas a seguir viendo respuestas
+duplicadas/mezcladas para *cualquier* mensaje durante todo el flujo de
+auto, no solo en la pregunta de la edad.
 
 ## Mientras no exista la API real: modo demo
 

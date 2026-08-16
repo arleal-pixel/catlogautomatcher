@@ -90,12 +90,12 @@ Body esperado:
   el paso 1 — es como identificamos a qué conversación de WhatsApp
   corresponde tu respuesta.
 - `resultado`: **obligatorio**, puede ser cualquier objeto JSON — hoy lo
-  guardamos tal cual (como texto JSON) en un campo del contacto para que
-  el asesor lo vea antes de la llamada. Si quieres que separemos campos
-  específicos (precio, cobertura, deducible, etc.) en sus propios campos
-  del CRM, dinos la forma exacta que vas a mandar y lo ajustamos de
-  nuestro lado — no es una limitación tuya, es una decisión que tomamos
-  juntos.
+  guardamos tal cual (como texto JSON) en el registro de esa cotización
+  dentro de nuestro CRM, para que el asesor lo vea antes de la llamada. Si
+  quieres que separemos campos específicos (precio, cobertura, deducible,
+  etc.) en sus propios campos, dinos la forma exacta que vas a mandar y lo
+  ajustamos de nuestro lado — no es una limitación tuya, es una decisión
+  que tomamos juntos.
 
 Nuestra respuesta a tu callback:
 ```json

@@ -244,10 +244,11 @@ resto de la API sigue funcionando normal (mismo patrón que el OCR).
 
 | variable | para qué |
 |---|---|
-| `GHL_API_TOKEN` | Private Integration Token de GHL (Configuración → Private Integrations). Se manda como `Authorization: Bearer <token>`. |
-| `GHL_API_VERSION` | Header `Version` que exige la API de GHL. Default `2021-07-28`. |
-| `GHL_LOCATION_ID` | Opcional — el location/sub-cuenta, si tu token es a nivel agencia. |
+| `GHL_API_TOKEN` | Private Integration Token de GHL (Configuración → Private Integrations). Se manda como `Authorization: Bearer <token>`. Para el flujo de auto (guardar vehículo/conductor/cotización) necesita además los scopes de Objects habilitados: `objects/schema.readonly`, `objects/record.write`, `objects/record.readonly` — se editan en la misma Private Integration, sin generar un token nuevo. |
+| `GHL_API_VERSION` | Header `Version` que exige la mayoría de la API de GHL (Contactos, Conversaciones, etc). Default `2021-07-28`. La API de Custom Objects usa un `Version` distinto (`v3`, fijo en el código) — no se controla con esta variable. |
+| `GHL_LOCATION_ID` | El ID de tu sub-cuenta/location en GHL (lo ves en la URL del panel: `app.gohighlevel.com/v2/location/<esto>/...`). **Requerido** para el flujo de auto — la API de Custom Objects lo exige en cada llamada. |
 | `GHL_TABLOTA_ID` | Qué base de datos usar para resolver los mensajes entrantes. Default `"default"`. |
+| `GHL_OBJETO_SCHEMA_KEY` | Opcional — key del Custom Object donde se guarda vehículo/conductor/cotización de cada contacto de auto. Default `custom_objects.chatbotprinciap` (el objeto ya existe en la cuenta). |
 | `GHL_WEBHOOK_SECRET` | Opcional pero recomendado — un secreto propio (no lo da GHL) para que nadie más pueda pegarle a `/ghl/webhook`. Se valida por `?secret=...` o header `X-GHL-Secret`. |
 | `COTIZADOR_AUTO_URL` | URL de la API de cotización del asegurador (aún no existe). Sin esto, `/cotizar/auto` deja al contacto "esperando cotización" para seguimiento manual — ver `GHL_CHATBOT_AUTO.md`. |
 | `COTIZADOR_AUTO_TOKEN` | Token/Bearer para autenticarte contra esa API, cuando exista. |

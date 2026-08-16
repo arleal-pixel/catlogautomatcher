@@ -1209,9 +1209,9 @@ async def cotizador_auto_webhook(request: Request):
     mandarlo como ?secret=... o header X-Cotizador-Secret -- igual que
     GHL_WEBHOOK_SECRET en /ghl/webhook.
 
-    Guarda el resultado en Custom Fields del contacto y lo marca como listo
-    para agendar (tag auto-listo-para-agendar) -- ver GHL_CHATBOT_AUTO.md,
-    Parte D."""
+    Guarda el resultado en el registro de esa cotizacion dentro del Custom
+    Object chatbotprinciap y lo marca como listo para agendar (tag
+    auto-listo-para-agendar) -- ver GHL_CHATBOT_AUTO.md, Parte D."""
     if not _GHL_DISPONIBLE:
         raise HTTPException(
             status_code=501,

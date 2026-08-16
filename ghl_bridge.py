@@ -34,6 +34,23 @@ GHL_API_VERSION = os.environ.get("GHL_API_VERSION", "2021-07-28")
 GHL_LOCATION_ID = os.environ.get("GHL_LOCATION_ID")
 GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
 
+# Custom Object de GHL donde vive el registro por cotizacion (vehiculo +
+# datos del conductor + resultado). Confirmado en vivo contra la cuenta
+# real (GET /objects/custom_objects.chatbotprinciap?fetchProperties=true):
+# el objeto se llama "chatbotprinciap" y sus campos (todos TEXT salvo
+# auto_cotizacion_resultado que es LARGE_TEXT) son: contacto,
+# vehiculo_clave, conductor_nombre, conductor_edad,
+# conductor_codigo_postal, auto_cotizacion_resultado. "contacto" es un
+# campo de texto normal (NO una asociacion nativa de GHL) donde guardamos
+# el contactId -- por eso las busquedas de abajo filtran por ese valor.
+GHL_OBJETO_SCHEMA_KEY = os.environ.get("GHL_OBJETO_SCHEMA_KEY", "custom_objects.chatbotprinciap")
+
+# La API de Custom Objects usa un header Version distinto al resto de la
+# API de GHL (que usa la fecha en GHL_API_VERSION, ej. "2021-07-28") --
+# esta usa el literal "v3". Confirmado en vivo: con la fecha responde
+# 401 "version header was not found."
+GHL_OBJETOS_VERSION = "v3"
+
 # API de cotizacion del asegurador -- AUN NO EXISTE. Cuando la tengas, solo
 # llena estas 3 variables de entorno (no hace falta tocar codigo). El
 # resultado no se espera sincrono: mandamos la solicitud con una
@@ -53,6 +70,15 @@ _RESET_WORDS = {"reiniciar", "reset", "empezar", "de nuevo", "otro auto", "nuevo
 # un solo worker). Ver README "Limitaciones (POC)".
 CONVERSACIONES: Dict[str, dict] = {}
 
+# contact_id -> id del registro del Custom Object creado para la
+# cotizacion EN CURSO (fase 'esperando_cotizacion') -- para que cuando
+# llegue el callback async sepamos cual registro actualizar con el
+# resultado sin tener que buscarlo. En memoria, misma limitacion POC que
+# CONVERSACIONES (si el proceso se reinicia mientras un contacto esta
+# esperando, recibir_resultado_cotizacion() cae a buscar_registro_conductor
+# como respaldo -- ver ahi).
+REGISTROS_ACTIVOS: Dict[str, str] = {}
+
 
 class GHLError(Exception):
     pass
@@ -64,6 +90,19 @@ def _headers() -> dict:
     return {
         "Authorization": f"Bearer {GHL_API_TOKEN}",
         "Version": GHL_API_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+def _headers_objetos() -> dict:
+    """Igual que _headers() pero con el Version que espera la API de
+    Custom Objects (ver GHL_OBJETOS_VERSION arriba) -- son dos APIs
+    distintas dentro de GHL con distinto versionado."""
+    if not GHL_API_TOKEN:
+        raise GHLError("Falta GHL_API_TOKEN en el entorno (Private Integration Token de GoHighLevel).")
+    return {
+        "Authorization": f"Bearer {GHL_API_TOKEN}",
+        "Version": GHL_OBJETOS_VERSION,
         "Content-Type": "application/json",
     }
 
@@ -102,38 +141,102 @@ def agregar_tag(contact_id: str, tag: str) -> None:
         raise GHLError(f"GHL (add tag) respondio {r.status_code}: {r.text[:300]}")
 
 
-def actualizar_custom_fields(contact_id: str, campos: Dict[str, str]) -> None:
-    """PUT /contacts/{contactId} -- guarda datos del conductor/vehiculo en
-    Custom Fields del contacto para que el agente humano los vea en la
-    tarjeta de la cita.
+def crear_registro_cotizacion(contact_id: str, vehiculo: dict, datos_conductor: dict) -> Optional[str]:
+    """POST /objects/{schemaKey}/records -- crea un registro NUEVO en el
+    Custom Object por cada cotizacion (a proposito, no se actualiza uno
+    existente) para conservar el historial completo de autos que cotizo
+    cada contacto -- ese era el motivo de usar Custom Objects en vez de
+    Custom Fields del Contact. "contacto" es requerido por el schema del
+    objeto -- ahi guardamos el contactId de GHL como texto plano.
 
-    IMPORTANTE: confirma en tu cuenta el formato exacto que espera tu
-    version de la API v2 para customFields (algunas cuentas usan
-    [{"id": "<custom_field_id>", "field_value": "..."}] por ID, otras
-    aceptan la key). Crea primero los Custom Fields en GHL (Configuracion >
-    Custom Fields) y ajusta CAMPOS_GHL abajo con sus IDs reales antes de
-    usar esto en producción -- no lo he podido probar en vivo contra tu
-    cuenta."""
-    custom_fields = [{"key": k, "field_value": v} for k, v in campos.items()]
+    Devuelve el id del registro creado (lo necesita
+    recibir_resultado_cotizacion() despues, para saber cual actualizar
+    cuando llegue el resultado async), o None si la llamada falla."""
+    propiedades = {
+        "contacto": contact_id,
+        "vehiculo_clave": vehiculo.get("clave") or "",
+        "conductor_nombre": datos_conductor.get("nombre") or "",
+        "conductor_edad": str(datos_conductor.get("edad") or ""),
+        "conductor_codigo_postal": datos_conductor.get("codigo_postal") or "",
+    }
+    body = {"locationId": GHL_LOCATION_ID, "properties": propiedades}
     with httpx.Client(timeout=15) as client:
-        r = client.put(f"{GHL_API_BASE}/contacts/{contact_id}",
-                        json={"customFields": custom_fields}, headers=_headers())
+        r = client.post(f"{GHL_API_BASE}/objects/{GHL_OBJETO_SCHEMA_KEY}/records",
+                         json=body, headers=_headers_objetos())
     if r.status_code >= 300:
-        raise GHLError(f"GHL (update contact) respondio {r.status_code}: {r.text[:300]}")
+        raise GHLError(f"GHL (crear registro) respondio {r.status_code}: {r.text[:300]}")
+    return (r.json().get("record") or {}).get("id")
 
 
-# Mapeo logico -> key del Custom Field en GHL. Ajusta a los nombres reales
-# que crees en Configuracion > Custom Fields antes de ir a produccion.
-CAMPOS_GHL = {
-    "vehiculo_clave": "vehiculo_clave",
-    "vehiculo_descripcion": "vehiculo_descripcion",
-    "conductor_nombre": "conductor_nombre",
-    "conductor_edad": "conductor_edad",
-    "conductor_cp": "conductor_codigo_postal",
-    "cotizacion_resultado": "auto_cotizacion_resultado",
-}
+def actualizar_registro_cotizacion(record_id: str, propiedades: Dict[str, str]) -> None:
+    """PUT /objects/{schemaKey}/records/{id} -- actualiza propiedades de un
+    registro ya creado (lo usamos para escribir auto_cotizacion_resultado
+    cuando llega el callback de la API del asegurador)."""
+    url = f"{GHL_API_BASE}/objects/{GHL_OBJETO_SCHEMA_KEY}/records/{record_id}"
+    with httpx.Client(timeout=15) as client:
+        r = client.put(url, params={"locationId": GHL_LOCATION_ID},
+                        json={"properties": propiedades}, headers=_headers_objetos())
+    if r.status_code >= 300:
+        raise GHLError(f"GHL (actualizar registro) respondio {r.status_code}: {r.text[:300]}")
+
+
+def buscar_registro_conductor(contact_id: str) -> Optional[dict]:
+    """POST /objects/{schemaKey}/records/search -- busca los registros de
+    este contactId (via el campo de texto "contacto", la unica propiedad
+    "searchable" del objeto) y devuelve el mas reciente, o None si nunca
+    ha cotizado. Se filtra por igualdad exacta despues de la busqueda como
+    resguardo -- "query" hace busqueda de texto sobre las
+    searchableProperties, no necesariamente coincidencia exacta."""
+    body = {
+        "locationId": GHL_LOCATION_ID,
+        "page": 1,
+        "pageLimit": 20,
+        "query": contact_id,
+        "searchAfter": [],
+    }
+    with httpx.Client(timeout=15) as client:
+        r = client.post(f"{GHL_API_BASE}/objects/{GHL_OBJETO_SCHEMA_KEY}/records/search",
+                         json=body, headers=_headers_objetos())
+    if r.status_code >= 300:
+        raise GHLError(f"GHL (buscar registros) respondio {r.status_code}: {r.text[:300]}")
+    registros = r.json().get("records") or []
+    propios = [reg for reg in registros if (reg.get("properties") or {}).get("contacto") == contact_id]
+    if not propios:
+        return None
+    propios.sort(key=lambda reg: reg.get("createdAt") or "", reverse=True)
+    return propios[0]
+
 
 TAG_LISTO_PARA_AGENDAR = "auto-listo-para-agendar"
+
+
+def obtener_datos_conductor(contact_id: str) -> Optional[dict]:
+    """Busca (via buscar_registro_conductor) el registro de cotizacion mas
+    reciente de este contacto en el Custom Object y devuelve
+    nombre/edad/codigo_postal si los tres estan completos -- asi no se le
+    vuelven a pedir si ya cotizo antes. Devuelve None si nunca ha
+    cotizado, si falta cualquiera de los tres datos, o si la llamada a
+    GHL falla (se trata igual que 'primera vez', pidiendo todo de cero)."""
+    try:
+        registro = buscar_registro_conductor(contact_id)
+    except Exception as e:
+        print(f"[obtener-datos-conductor] fallo consultando GHL para {contact_id}: {e}")
+        return None
+    if not registro:
+        return None
+
+    propiedades = registro.get("properties") or {}
+    nombre = propiedades.get("conductor_nombre")
+    edad_txt = propiedades.get("conductor_edad")
+    cp = propiedades.get("conductor_codigo_postal")
+    if not nombre or not edad_txt or not cp:
+        return None
+    try:
+        edad = int(str(edad_txt).strip())
+    except (TypeError, ValueError):
+        return None
+
+    return {"nombre": str(nombre).strip(), "edad": edad, "codigo_postal": str(cp).strip()}
 
 
 def enviar_a_cotizar(contact_id: str, vehiculo: dict, datos_conductor: dict) -> bool:
@@ -184,23 +287,40 @@ def recibir_resultado_cotizacion(contact_id: str, resultado: dict) -> bool:
     termine de calcular el precio.
 
     `resultado` es lo que mande esa API -- forma exacta TBD, por ahora se
-    guarda tal cual (como JSON) en un Custom Field para que el asesor lo
-    vea antes de la llamada. Ajusta esto cuando definas el contrato real
-    (ej. separar precio/cobertura en sus propios Custom Fields).
+    guarda tal cual (como JSON) en auto_cotizacion_resultado (LARGE_TEXT)
+    del registro de esa cotizacion en el Custom Object, para que el
+    asesor lo vea antes de la llamada. Ajusta esto cuando definas el
+    contrato real (ej. separar precio/cobertura en sus propias
+    propiedades).
 
     Marca al contacto como listo para agendar -- esto es lo que dispara el
     workflow "Auto - Reactivar y Agendar" (ver GHL_CHATBOT_AUTO.md)."""
+    record_id = REGISTROS_ACTIVOS.pop(contact_id, None)
     CONVERSACIONES.pop(contact_id, None)  # limpia 'esperando_cotizacion' si seguia ahi
 
     try:
-        resultado_txt = json.dumps(resultado, ensure_ascii=False)[:2000]
+        resultado_txt = json.dumps(resultado, ensure_ascii=False)[:5000]
     except (TypeError, ValueError):
-        resultado_txt = str(resultado)[:2000]
+        resultado_txt = str(resultado)[:5000]
 
     try:
-        actualizar_custom_fields(contact_id, {CAMPOS_GHL["cotizacion_resultado"]: resultado_txt})
+        if not record_id:
+            # el proceso se reinicio (o REGISTROS_ACTIVOS se perdio por
+            # cualquier otra razon) entre crear el registro y recibir el
+            # callback -- se busca el mas reciente de este contacto como
+            # respaldo en vez de perder el resultado.
+            registro = buscar_registro_conductor(contact_id)
+            record_id = registro.get("id") if registro else None
+        if not record_id:
+            raise GHLError(f"no encontre ningun registro del Custom Object para {contact_id}")
+        actualizar_registro_cotizacion(record_id, {"auto_cotizacion_resultado": resultado_txt})
         agregar_tag(contact_id, TAG_LISTO_PARA_AGENDAR)
-    except Exception:
+    except Exception as e:
+        # Revisa los logs de Railway (busca "[cotizador-auto-webhook]") si el
+        # flujo se queda trabado despues de "estamos calculando" -- el error
+        # real de GHL (scope faltante, registro no encontrado, etc.)
+        # aparece aqui.
+        print(f"[cotizador-auto-webhook] fallo guardando resultado/tag en GHL para {contact_id}: {e}")
         return False
     return True
 
@@ -299,7 +419,30 @@ _PREGUNTAS_CONDUCTOR = {
 def _iniciar_datos_conductor(contact_id: str, vehiculo: dict) -> str:
     """Arranca la fase de recoleccion de datos del conductor justo despues
     de resolver el vehiculo. Reemplaza la sesion de CONVERSACIONES (ya no
-    hace falta el session_id del motor de vehiculos)."""
+    hace falta el session_id del motor de vehiculos).
+
+    Si el contacto ya cotizo antes y tiene nombre/edad/CP guardados
+    (obtener_datos_conductor), no se los vuelve a pedir uno por uno --
+    se los confirma de un jalon, para que pueda cotizar otro vehiculo sin
+    repetir sus datos personales cada vez."""
+    datos_previos = None
+    try:
+        datos_previos = obtener_datos_conductor(contact_id)
+    except Exception:
+        datos_previos = None
+
+    if datos_previos:
+        CONVERSACIONES[contact_id] = {
+            "fase": "confirmar_datos_conductor",
+            "vehiculo": vehiculo,
+            "datos": datos_previos,
+            "actualizado": datetime.now(timezone.utc).isoformat(),
+        }
+        return (f"Ya tengo tus datos de antes: *{datos_previos['nombre']}*, "
+                f"{datos_previos['edad']} años, CP {datos_previos['codigo_postal']}. "
+                "¿Sigue igual? Responde \"sí\" para continuar, o dime qué quieres "
+                "cambiar (nombre, edad o código postal).")
+
     CONVERSACIONES[contact_id] = {
         "fase": "datos_conductor",
         "paso": "nombre",
@@ -308,6 +451,43 @@ def _iniciar_datos_conductor(contact_id: str, vehiculo: dict) -> str:
         "actualizado": datetime.now(timezone.utc).isoformat(),
     }
     return _PREGUNTAS_CONDUCTOR["nombre"]
+
+
+def _avanzar_confirmar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
+    """Procesa la respuesta a '¿sigue igual?' cuando ya teniamos datos del
+    conductor de una cotizacion anterior. Afirmar -> cotiza directo con
+    esos datos. Mencionar un campo (nombre/edad/codigo postal) -> pide
+    solo ese campo y cotiza con el resto sin tocar (ver 'editar_uno' en
+    _avanzar_datos_conductor). Cualquier otra cosa -> por seguridad,
+    vuelve a pedir los tres desde cero."""
+    t = disc.normalizar(texto)
+
+    if t in disc._AFIRMACIONES or t in {"SI", "SIGUE IGUAL", "CONTINUAR", "CORRECTO", "OK"}:
+        return _finalizar_datos_conductor(contact_id, conv)
+
+    if "NOMBRE" in t:
+        conv["fase"] = "datos_conductor"
+        conv["paso"] = "nombre"
+        conv["editar_uno"] = True
+        return "Perfecto, ¿cuál es tu nombre completo?"
+
+    if "EDAD" in t:
+        conv["fase"] = "datos_conductor"
+        conv["paso"] = "edad"
+        conv["editar_uno"] = True
+        return _PREGUNTAS_CONDUCTOR["edad"]
+
+    if "CP" in t or "POSTAL" in t or "CODIGO" in t:
+        conv["fase"] = "datos_conductor"
+        conv["paso"] = "cp"
+        conv["editar_uno"] = True
+        return _PREGUNTAS_CONDUCTOR["cp"]
+
+    conv["fase"] = "datos_conductor"
+    conv["paso"] = "nombre"
+    conv["datos"] = {}
+    conv.pop("editar_uno", None)
+    return "No te entendí bien -- empecemos de nuevo con tus datos. " + _PREGUNTAS_CONDUCTOR["nombre"]
 
 
 def _edad_valida(texto: str) -> Optional[int]:
@@ -326,14 +506,22 @@ def _cp_valido(texto: str) -> Optional[str]:
 def _avanzar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
     """Procesa un mensaje mientras se recolectan nombre/edad/codigo postal.
     Un paso invalido (edad o CP que no calzan) se re-pregunta con una nota,
-    sin avanzar -- igual que hace el motor de vehiculos con sus reintentos."""
+    sin avanzar -- igual que hace el motor de vehiculos con sus reintentos.
+
+    Si `conv["editar_uno"]` esta activo (viene de 'quiero cambiar mi
+    edad', ver _avanzar_confirmar_datos_conductor), se corrige SOLO ese
+    campo y se finaliza directo -- los otros dos ya son validos, no hace
+    falta re-preguntarlos."""
     paso = conv["paso"]
     texto = (texto or "").strip()
+    editar_uno = conv.get("editar_uno", False)
 
     if paso == "nombre":
         if len(texto) < 3:
             return "No me quedó claro tu nombre completo, ¿me lo repites?"
         conv["datos"]["nombre"] = texto
+        if editar_uno:
+            return _finalizar_datos_conductor(contact_id, conv)
         conv["paso"] = "edad"
         conv["actualizado"] = datetime.now(timezone.utc).isoformat()
         return _PREGUNTAS_CONDUCTOR["edad"]
@@ -343,11 +531,13 @@ def _avanzar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
         if edad is None:
             return "No reconocí una edad válida (16-99). ¿Cuál es tu edad?"
         conv["datos"]["edad"] = edad
+        if editar_uno:
+            return _finalizar_datos_conductor(contact_id, conv)
         conv["paso"] = "cp"
         conv["actualizado"] = datetime.now(timezone.utc).isoformat()
         return _PREGUNTAS_CONDUCTOR["cp"]
 
-    # paso == "cp"
+    # paso == "cp" -- ultimo paso siempre, con o sin editar_uno
     cp = _cp_valido(texto)
     if cp is None:
         return "No reconocí un código postal de 5 dígitos. ¿Cuál es tu código postal?"
@@ -357,12 +547,14 @@ def _avanzar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
 
 def _finalizar_datos_conductor(contact_id: str, conv: dict) -> str:
     """Ultimo paso de la recoleccion: guarda vehiculo+conductor en GHL
-    (custom fields) y manda la solicitud a la API de cotizacion del
-    asegurador (enviar_a_cotizar) -- pero OJO, esto NO deja al contacto
-    listo para agendar todavia. El tag TAG_LISTO_PARA_AGENDAR se agrega
-    hasta que llega el resultado via recibir_resultado_cotizacion() (el
-    callback de esa API). Mientras tanto, el contacto queda en fase
-    'esperando_cotizacion' -- ver procesar_mensaje_whatsapp().
+    (crea un registro nuevo en el Custom Object chatbotprinciap, ver
+    crear_registro_cotizacion) y manda la solicitud a la API de
+    cotizacion del asegurador (enviar_a_cotizar) -- pero OJO, esto NO
+    deja al contacto listo para agendar todavia. El tag
+    TAG_LISTO_PARA_AGENDAR se agrega hasta que llega el resultado via
+    recibir_resultado_cotizacion() (el callback de esa API). Mientras
+    tanto, el contacto queda en fase 'esperando_cotizacion' -- ver
+    procesar_mensaje_whatsapp().
 
     Los errores contra la API de GHL no rompen la conversacion -- no
     dejamos al cliente sin respuesta por un problema de credenciales/red
@@ -371,15 +563,11 @@ def _finalizar_datos_conductor(contact_id: str, conv: dict) -> str:
     datos = conv["datos"]
 
     try:
-        actualizar_custom_fields(contact_id, {
-            CAMPOS_GHL["vehiculo_clave"]: vehiculo.get("clave") or "",
-            CAMPOS_GHL["vehiculo_descripcion"]: vehiculo.get("descripcion") or "",
-            CAMPOS_GHL["conductor_nombre"]: datos.get("nombre") or "",
-            CAMPOS_GHL["conductor_edad"]: str(datos.get("edad") or ""),
-            CAMPOS_GHL["conductor_cp"]: datos.get("codigo_postal") or "",
-        })
-    except Exception:
-        pass
+        record_id = crear_registro_cotizacion(contact_id, vehiculo, datos)
+        if record_id:
+            REGISTROS_ACTIVOS[contact_id] = record_id
+    except Exception as e:
+        print(f"[finalizar-datos-conductor] fallo guardando vehiculo/conductor en GHL para {contact_id}: {e}")
 
     enviado = False
     try:
@@ -418,6 +606,11 @@ def procesar_mensaje_whatsapp(contact_id: str, texto: str, tablota_id: Optional[
         return "Listo, empezamos de nuevo. Dime marca, modelo y año del auto."
 
     conv = CONVERSACIONES.get(contact_id)
+
+    # Vehiculo resuelto y ya teniamos datos del conductor de antes ->
+    # confirmar en vez de re-pedirlos uno por uno.
+    if conv and conv.get("fase") == "confirmar_datos_conductor":
+        return _avanzar_confirmar_datos_conductor(contact_id, conv, texto)
 
     # Vehiculo ya resuelto, recolectando datos del conductor (nombre/edad/CP).
     if conv and conv.get("fase") == "datos_conductor":
