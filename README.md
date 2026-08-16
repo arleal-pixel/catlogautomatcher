@@ -249,6 +249,19 @@ resto de la API sigue funcionando normal (mismo patrón que el OCR).
 | `GHL_LOCATION_ID` | Opcional — el location/sub-cuenta, si tu token es a nivel agencia. |
 | `GHL_TABLOTA_ID` | Qué base de datos usar para resolver los mensajes entrantes. Default `"default"`. |
 | `GHL_WEBHOOK_SECRET` | Opcional pero recomendado — un secreto propio (no lo da GHL) para que nadie más pueda pegarle a `/ghl/webhook`. Se valida por `?secret=...` o header `X-GHL-Secret`. |
+| `COTIZADOR_AUTO_URL` | URL de la API de cotización del asegurador (aún no existe). Sin esto, `/cotizar/auto` deja al contacto "esperando cotización" para seguimiento manual — ver `GHL_CHATBOT_AUTO.md`. |
+| `COTIZADOR_AUTO_TOKEN` | Token/Bearer para autenticarte contra esa API, cuando exista. |
+| `COTIZADOR_AUTO_CALLBACK_URL` | Tu propia URL pública + `/cotizador-auto/webhook` — se la mandas a esa API para que te avise cuando termine de cotizar. |
+| `COTIZADOR_AUTO_WEBHOOK_SECRET` | Opcional — secreto propio para `/cotizador-auto/webhook`, mismo patrón que `GHL_WEBHOOK_SECRET`. |
+
+Mientras no exista la API real, hay una **API demo** (`demo_cotizador_auto.py`,
+`POST /demo/cotizador-auto`) que simula el asegurador con precios inventados
+para poder probar el flujo completo — apunta `COTIZADOR_AUTO_URL` a ella
+(mismo servicio, no requiere desplegar nada nuevo). El contrato completo
+(qué le mandamos a la API real y qué esperamos de vuelta) está en
+`COTIZADOR_AUTO_CONTRATO.md` — pásaselo a quien construya esa API. Detalles
+del flujo completo de auto (vehículo → datos del conductor → cotización →
+cita) en `GHL_CHATBOT_AUTO.md`.
 
 ### 3. Configurar el workflow del lado de GHL
 

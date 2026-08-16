@@ -76,6 +76,14 @@ app = FastAPI(
     ),
 )
 
+# API DEMO de cotizacion de auto -- para probar /cotizador-auto/webhook de
+# punta a punta MIENTRAS no existe la API real del asegurador. Ver
+# demo_cotizador_auto.py y COTIZADOR_AUTO_CONTRATO.md. Se activa apuntando
+# COTIZADOR_AUTO_URL a este mismo servicio -- no hace falta desplegar nada
+# nuevo. Cuando exista la API real, solo cambia esa variable de entorno.
+from demo_cotizador_auto import router as _demo_cotizador_router
+app.include_router(_demo_cotizador_router)
+
 # --------------------------------------------------------------------------
 # Sesiones en memoria. POC: no sobrevive reinicios ni corre con >1 worker.
 # Para produccion cambiar por Redis/DB si hace falta escalar horizontal.
@@ -244,6 +252,12 @@ class GHLWebhookOut(BaseModel):
     mensaje_recibido: Optional[str] = None
     respuesta: Optional[str] = None
     enviado: bool = False
+    error: Optional[str] = None
+
+
+class CotizadorAutoWebhookOut(BaseModel):
+    ok: bool
+    contact_id: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -1179,3 +1193,53 @@ async def ghl_webhook(request: Request, dry_run: bool = False):
 
     return GHLWebhookOut(ok=True, contact_id=contact_id, mensaje_recibido=mensaje,
                           respuesta=respuesta, enviado=True)
+
+
+@app.post("/cotizador-auto/webhook", response_model=CotizadorAutoWebhookOut)
+async def cotizador_auto_webhook(request: Request):
+    """Callback de la API de cotizacion de auto del asegurador -- AUN NO
+    EXISTE (ver COTIZADOR_AUTO_URL en ghl_bridge.py). Cuando esa API termine
+    de calcular el precio, debe mandar un POST aqui con el resultado.
+
+    Body esperado (ajusta cuando definas el contrato real de esa API):
+
+        {"contact_id": "...", "resultado": {"precio": ..., "cobertura": ..., ...}}
+
+    Si definiste COTIZADOR_AUTO_WEBHOOK_SECRET en el entorno, hay que
+    mandarlo como ?secret=... o header X-Cotizador-Secret -- igual que
+    GHL_WEBHOOK_SECRET en /ghl/webhook.
+
+    Guarda el resultado en Custom Fields del contacto y lo marca como listo
+    para agendar (tag auto-listo-para-agendar) -- ver GHL_CHATBOT_AUTO.md,
+    Parte D."""
+    if not _GHL_DISPONIBLE:
+        raise HTTPException(
+            status_code=501,
+            detail="Integracion con GHL no disponible: instala requirements-ghl.txt (httpx).",
+        )
+
+    secreto_env = os.environ.get("COTIZADOR_AUTO_WEBHOOK_SECRET")
+    if secreto_env:
+        secreto_in = request.query_params.get("secret") or request.headers.get("X-Cotizador-Secret")
+        if secreto_in != secreto_env:
+            raise HTTPException(status_code=401,
+                                 detail="secret invalido o faltante (?secret=... o header X-Cotizador-Secret)")
+
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    contact_id = _extraer_campo(data, "contact_id", "contactId")
+    resultado = data.get("resultado")
+    if not contact_id or resultado is None:
+        return CotizadorAutoWebhookOut(
+            ok=False, contact_id=contact_id,
+            error="Falta 'contact_id' y/o 'resultado' en el body.",
+        )
+
+    ok = ghl_bridge.recibir_resultado_cotizacion(contact_id, resultado)
+    return CotizadorAutoWebhookOut(ok=ok, contact_id=contact_id,
+                                    error=None if ok else "No se pudo guardar el resultado en GHL (revisa logs).")

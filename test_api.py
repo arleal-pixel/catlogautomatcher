@@ -327,9 +327,59 @@ r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "xle"})
 d = r.json()
 check(d["ok"] and d["enviado"] and len(enviados) == 2,
       f"segundo mensaje del mismo contact_id continua la MISMA sesion (obtuvo {d})")
-check("ghl-c3" not in gb.CONVERSACIONES,
-      f"sesion se limpia de CONVERSACIONES al resolverse (quedo: {gb.CONVERSACIONES.get('ghl-c3')})")
+check(gb.CONVERSACIONES.get("ghl-c3", {}).get("fase") == "datos_conductor"
+      and "nombre completo" in d["respuesta"],
+      f"al resolverse el vehiculo, pasa a pedir datos del conductor en vez de terminar (obtuvo {d}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-c3')})")
 print("   mensajes mandados a GHL:", enviados)
+
+# flujo completo de datos del conductor (nombre -> edad -> CP) hasta que se limpia la sesion
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "Juan Perez"})
+d = r.json()
+check(d["ok"] and "edad" in d["respuesta"].lower() and gb.CONVERSACIONES["ghl-c3"]["datos"]["nombre"] == "Juan Perez",
+      f"nombre guardado, sigue con edad (obtuvo {d})")
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "no se, como 30"})
+d = r.json()
+check(d["ok"] and "código postal" in d["respuesta"].lower() and gb.CONVERSACIONES["ghl-c3"]["datos"]["edad"] == 30,
+      f"edad extraida de texto libre, sigue con codigo postal (obtuvo {d})")
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "abc"})
+d = r.json()
+check(d["ok"] and "no reconocí un código postal" in d["respuesta"].lower() and "ghl-c3" in gb.CONVERSACIONES,
+      f"CP invalido se re-pregunta sin avanzar (obtuvo {d})")
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "06700"})
+d = r.json()
+check(d["ok"] and "ya tengo todos tus datos" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-c3", {}).get("fase") == "esperando_cotizacion",
+      f"CP valido termina la recoleccion y pasa a esperar la cotizacion (obtuvo {d}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-c3')})")
+# nota: como COTIZADOR_AUTO_URL no esta configurado en este entorno de
+# pruebas, el mensaje es la variante "un asesor va a revisar" (enviado=False
+# dentro de _finalizar_datos_conductor) -- ambas variantes dejan la fase en
+# 'esperando_cotizacion', que es lo que importa aqui.
+
+# mientras espera la cotizacion, cualquier mensaje nuevo se contesta con "todavia estamos calculando"
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "ya esta?"})
+d = r.json()
+check(d["ok"] and "todavía estamos calculando" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-c3", {}).get("fase") == "esperando_cotizacion",
+      f"mensaje durante la espera no se trata como vehiculo nuevo (obtuvo {d})")
+
+# llega el callback de la (futura) API de cotizacion -> /cotizador-auto/webhook
+r = client.post("/cotizador-auto/webhook", json={
+    "contact_id": "ghl-c3", "resultado": {"precio": 12345.67, "cobertura": "amplia"},
+})
+d = r.json()
+check(d["contact_id"] == "ghl-c3" and "ghl-c3" not in gb.CONVERSACIONES,
+      f"/cotizador-auto/webhook limpia la fase 'esperando_cotizacion' del contacto (obtuvo {d}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-c3')})")
+# ok=False es esperado aqui: no hay GHL_API_TOKEN en este entorno de pruebas,
+# asi que actualizar_custom_fields/agregar_tag fallan -- lo que importa es que
+# no tumbo el proceso y limpio el estado local igual.
+
+r = client.post("/cotizador-auto/webhook", json={"contact_id": "ghl-sin-resultado"})
+d = r.json()
+check(r.status_code == 200 and d["ok"] is False and "resultado" in d["error"],
+      f"/cotizador-auto/webhook sin 'resultado' -> ok=False con error claro (obtuvo {d})")
 
 # marca en el mensaje final de "resuelto"
 client.post("/ghl/webhook", json={"contact_id": "ghl-marca", "mensaje": "corolla 2024"})
@@ -352,8 +402,9 @@ check(gb.CONVERSACIONES["ghl-num1"]["opciones_numeradas"] == [
 ], f"mapeo numero->valor guardado correcto (obtuvo {gb.CONVERSACIONES['ghl-num1']['opciones_numeradas']})")
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "2"})
 d = r.json()
-check(d["ok"] and "CROSS LE HEV" in d["respuesta"] and "ghl-num1" not in gb.CONVERSACIONES,
-      f"responder '2' resuelve directo a la 2a opcion (obtuvo {d.get('respuesta')})")
+check(d["ok"] and "CROSS LE HEV" in d["respuesta"]
+      and gb.CONVERSACIONES.get("ghl-num1", {}).get("fase") == "datos_conductor",
+      f"responder '2' resuelve directo a la 2a opcion y pasa a datos del conductor (obtuvo {d.get('respuesta')})")
 
 # opciones numeradas en 'sin_match_final' -- mismo mecanismo pero con clave
 gb.CONVERSACIONES.clear()
@@ -366,8 +417,9 @@ check(d["respuesta"].startswith("No reconocí tu respuesta") and "1. " in d["res
 numeradas = gb.CONVERSACIONES["ghl-num2"]["opciones_numeradas"]
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-num2", "mensaje": "1"})
 d = r.json()
-check(d["ok"] and numeradas[0]["clave"] in d["respuesta"] and "ghl-num2" not in gb.CONVERSACIONES,
-      f"responder '1' resuelve directo a la clave de la 1a opcion (obtuvo {d.get('respuesta')})")
+check(d["ok"] and numeradas[0]["clave"] in d["respuesta"]
+      and gb.CONVERSACIONES.get("ghl-num2", {}).get("fase") == "datos_conductor",
+      f"responder '1' resuelve directo a la clave de la 1a opcion y pasa a datos del conductor (obtuvo {d.get('respuesta')})")
 
 # "reiniciar" limpia la sesion aunque haya una pregunta pendiente
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-c4", "mensaje": "jetta 2020"})
