@@ -1,0 +1,30 @@
+# --- catlogautomatcher: imagen para correr el servidor MCP (mcp_server.py) ---
+#
+# Servicio APARTE del API principal (ver Dockerfile) -- mismo repo, otra
+# imagen, para no arrastrar dependencias de OCR/GHL que este servicio no usa.
+# Igual que el Dockerfile principal: las dependencias se instalan UNA VEZ al
+# construir la imagen, no en cada arranque -- evita el lio de Nixpacks con
+# Build/Pre-deploy/Start command y el ModuleNotFoundError que da pip install
+# en el paso equivocado.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copiamos primero SOLO los requirements -- Docker cachea esta capa, un
+# rebuild que solo toque mcp_server.py no vuelve a bajar nada.
+COPY requirements.txt requirements-mcp.txt ./
+RUN pip install --no-cache-dir \
+    -r requirements.txt \
+    -r requirements-mcp.txt
+
+COPY . .
+
+# El CSV real (data/tablotas/default.csv) NO se hornea en la imagen -- sigue
+# gitignored, hay que colocarlo en runtime (mismo caveat que el Dockerfile
+# principal) -- ver GHL_VOICE_MCP.md.
+
+ENV PORT=8080
+EXPOSE 8080
+
+CMD ["sh", "-c", "python mcp_server.py --http --port ${PORT}"]

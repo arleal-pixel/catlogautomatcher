@@ -26,17 +26,49 @@ Correrlo como servidor remoto (HTTP, para que GHL Voice AI se conecte):
 Una vez corriendo en una URL publica, pega esa URL en la configuracion de
 Custom Actions / MCP de tu agente de Voice AI en GoHighLevel -- ver
 GHL_VOICE_MCP.md para el paso a paso.
+
+Proteccion (MCP_AUTH_TOKEN):
+    Como este servidor queda en una URL publica, soporta proteccion opcional
+    por Bearer token -- si la variable de entorno MCP_AUTH_TOKEN esta
+    definida, toda llamada tiene que traer el header
+    "Authorization: Bearer <ese token>" o se rechaza con 401. Si NO esta
+    definida, el servidor queda abierto (util solo para pruebas rapidas en
+    local) -- se imprime una advertencia clara al arrancar en modo --http.
+    En GHL, ese mismo valor va en el campo "Authorization" de la
+    configuracion de Custom Action/MCP (como "Bearer <token>").
 """
 import argparse
 import json
 import os
+import secrets
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 mcp = FastMCP("segutrenda_mcp")
+
+MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN")
+
+
+class _BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Exige "Authorization: Bearer <MCP_AUTH_TOKEN>" en cada request si esa
+    variable de entorno esta definida. Usa comparacion de tiempo constante
+    (secrets.compare_digest) para no filtrar el token por timing attack."""
+
+    def __init__(self, app, token: str):
+        super().__init__(app)
+        self._esperado = f"Bearer {token}"
+
+    async def dispatch(self, request: Request, call_next):
+        recibido = request.headers.get("authorization", "")
+        if not secrets.compare_digest(recibido, self._esperado):
+            return JSONResponse({"error": "unauthorized", "mensaje": "Falta o es invalido el header Authorization: Bearer <token>."}, status_code=401)
+        return await call_next(request)
 
 GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
 
@@ -376,10 +408,21 @@ def main():
     args = parser.parse_args()
 
     if args.http:
+        import uvicorn
+
         mcp.settings.host = args.host
         mcp.settings.port = args.port
+
+        app = mcp.streamable_http_app()
+        if MCP_AUTH_TOKEN:
+            app.add_middleware(_BearerAuthMiddleware, token=MCP_AUTH_TOKEN)
+            print("[segutrenda_mcp] proteccion activada -- se exige 'Authorization: Bearer <MCP_AUTH_TOKEN>' en cada request.")
+        else:
+            print("[segutrenda_mcp] ADVERTENCIA: MCP_AUTH_TOKEN no esta definido -- el servidor queda ABIERTO, sin autenticacion. "
+                  "Define esa variable de entorno antes de usarlo fuera de pruebas locales.")
+
         print(f"[segutrenda_mcp] sirviendo streamable-http en http://{args.host}:{args.port}{mcp.settings.streamable_http_path}")
-        mcp.run(transport="streamable-http")
+        uvicorn.run(app, host=args.host, port=args.port, log_level=mcp.settings.log_level.lower())
     else:
         mcp.run()
 

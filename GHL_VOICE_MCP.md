@@ -38,27 +38,66 @@ python mcp_server.py --http --port 8000
 # el endpoint queda en http://localhost:8000/mcp
 ```
 
+## Protección (MCP_AUTH_TOKEN)
+
+Como este servidor queda en una URL pública, soporta protección por Bearer
+token. Antes de desplegarlo:
+
+1. Genera un token cualquiera (ej. `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`).
+2. Defínelo como variable de entorno `MCP_AUTH_TOKEN` donde corras el
+   servidor (local o Railway).
+3. Con eso puesto, **toda** llamada al servidor tiene que traer el header
+   `Authorization: Bearer <ese token>` o se rechaza con 401 -- probado en
+   automático: sin header → 401, token incorrecto → 401, token correcto → 200.
+
+**Si NO defines `MCP_AUTH_TOKEN`, el servidor queda abierto** (imprime una
+advertencia al arrancar) -- solo para pruebas rápidas en tu máquina, nunca
+para la versión desplegada.
+
 ## Desplegarlo (para que GHL lo alcance)
 
 Es un servicio **aparte** de tu API principal (`main.py`) -- mismo repo,
-otro proceso. En Railway:
+otro proceso.
 
-1. Crea un **segundo servicio** dentro del mismo proyecto (o uno nuevo),
+### Opción recomendada: Dockerfile (`Dockerfile.mcp`)
+
+Igual patrón que ya usas para el OCR -- las dependencias quedan horneadas en
+la imagen al construirla, nada de `pip install` en cada arranque (eso fue lo
+que causaba el `ModuleNotFoundError` con el Build/Pre-deploy/Start command
+de Nixpacks).
+
+1. En Railway, crea un **segundo servicio** dentro del mismo proyecto,
    apuntando a este mismo repo.
-2. Comando de arranque: `pip install -r requirements.txt -r requirements-mcp.txt && python mcp_server.py --http --port $PORT`
-3. Railway te da una URL publica (ej. `https://tu-mcp.up.railway.app`) -- el
+2. En **Settings → Build**, cambia el método de build a **Dockerfile** y
+   pon como ruta `Dockerfile.mcp` (no el `Dockerfile` normal -- ese es el
+   del API principal).
+3. En **Settings → Deploy**, deja el Start Command **vacío** -- ya lo trae
+   el `CMD` del Dockerfile.
+4. Variable de entorno: `MCP_AUTH_TOKEN=<tu token generado arriba>`.
+5. Railway te da una URL publica (ej. `https://tu-mcp.up.railway.app`) -- el
    endpoint MCP queda en `https://tu-mcp.up.railway.app/mcp`.
-4. Asegurate de subir tu `data/tablotas/default.csv` a este servicio tambien
+6. Asegurate de subir tu `data/tablotas/default.csv` a este servicio tambien
    (o apuntarlo al mismo volumen/almacenamiento que usa `main.py`) -- sin la
    base de datos de vehiculos, `segutrenda_resolver_vehiculo` no encuentra
    nada.
+
+### Alternativa: Nixpacks (Build/Start command)
+
+Si prefieres no usar Dockerfile: en **Settings → Build**, pon como **Custom
+Build Command** `pip install -r requirements.txt -r requirements-mcp.txt`
+(NO en "Pre-deploy Command" -- ese paso se descarta antes de arrancar y no
+persiste el install). En **Settings → Deploy**, Start Command:
+`python mcp_server.py --http --port $PORT`, y Pre-deploy Command vacío.
 
 ## Conectarlo desde Voice AI de GHL
 
 1. Ve a **AI Agents → Voice AI → [tu agente] → Agent Goals → Advanced Mode
    → Custom Actions** (o la seccion de MCP si tu cuenta ya la tiene).
 2. Agrega la URL del paso anterior (`https://tu-mcp.up.railway.app/mcp`).
-3. Prueba con el simulador de llamadas de GHL: dile "quiero cotizar mi
+3. En el campo **Authorization**, pon `Bearer <tu MCP_AUTH_TOKEN>`. El campo
+   **Location** no aplica aquí -- este servidor no maneja sub-cuentas de GHL,
+   déjalo vacío.
+4. Prueba con el simulador de llamadas de GHL: dile "quiero cotizar mi
    Nissan Sentra 2019" y confirma que el agente llama a
    `segutrenda_resolver_vehiculo`, sigue la conversacion con
    `segutrenda_elegir_opcion` si hace falta, y termina llamando a
