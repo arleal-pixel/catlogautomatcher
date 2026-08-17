@@ -12,6 +12,7 @@ Todas las rutas (salvo /health) requieren el header:  X-API-Key: <webkey>
 import asyncio
 import os
 import secrets
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional
@@ -1119,6 +1120,35 @@ def _extraer_campo(data: dict, *claves: str) -> Optional[str]:
     return None
 
 
+# (contact_id, mensaje normalizado) -> timestamp de la ultima vez que se
+# proceso. Resguardo contra doble-disparo del workflow de GHL: si "Trigger
+# a Workflow" del bot queda apuntando (por error de configuracion) al
+# mismo workflow que ya dispara con "Customer Replied", el mismo mensaje
+# del cliente llama a este endpoint DOS veces -- confirmado en vivo, ver
+# GHL_CHATBOT_AUTO.md "Troubleshooting". Sin este resguardo, la segunda
+# llamada hace avanzar la maquina de estados de ghl_bridge.py con el MISMO
+# texto otra vez (ej. el texto del vehiculo termina guardado como si fuera
+# el nombre del conductor, y la respuesta real del cliente se interpreta
+# como el siguiente campo -- edad, CP, etc., todo corrido un paso).
+_GHL_WEBHOOK_VISTOS: Dict[tuple, float] = {}
+_GHL_DEDUP_VENTANA_SEG = 6.0
+
+
+def _es_mensaje_duplicado(identificador: str, mensaje: str) -> bool:
+    """True si este mismo (contacto, mensaje) ya se proceso hace menos de
+    _GHL_DEDUP_VENTANA_SEG. Tambien registra este intento para la proxima
+    llamada. Limpieza perezosa de entradas viejas en cada llamada -- no
+    hace falta un hilo aparte, el volumen es bajo."""
+    clave = (identificador, (mensaje or "").strip().lower())
+    ahora = time.monotonic()
+    for k, t in list(_GHL_WEBHOOK_VISTOS.items()):
+        if ahora - t > _GHL_DEDUP_VENTANA_SEG:
+            _GHL_WEBHOOK_VISTOS.pop(k, None)
+    visto_hace = _GHL_WEBHOOK_VISTOS.get(clave)
+    _GHL_WEBHOOK_VISTOS[clave] = ahora
+    return visto_hace is not None and (ahora - visto_hace) <= _GHL_DEDUP_VENTANA_SEG
+
+
 @app.post("/ghl/webhook", response_model=GHLWebhookOut)
 async def ghl_webhook(request: Request, dry_run: bool = False):
     """Puente con GoHighLevel para conversaciones de WhatsApp.
@@ -1175,6 +1205,17 @@ async def ghl_webhook(request: Request, dry_run: bool = False):
             ok=False, contact_id=contact_id, mensaje_recibido=mensaje,
             error="Falta contact_id/telefono y/o mensaje en el body. Revisa el mapeo de campos "
                   "de la accion Webhook en tu workflow de GHL (usa ?dry_run=true para depurar).",
+        )
+
+    # dry_run se usa para depurar a mano -- no aplicar el resguardo ahi,
+    # solo en el flujo real donde un doble-disparo corrompe el estado.
+    if not dry_run and _es_mensaje_duplicado(identificador, mensaje):
+        return GHLWebhookOut(
+            ok=True, contact_id=contact_id, mensaje_recibido=mensaje, respuesta=None, enviado=False,
+            error=f"Mensaje duplicado (mismo contacto+texto hace menos de {int(_GHL_DEDUP_VENTANA_SEG)}s) "
+                  "-- ignorado para no procesar el mismo mensaje dos veces. Si esto aparece seguido, tu "
+                  "workflow de GHL esta disparando este webhook mas de una vez por mensaje -- revisa la "
+                  "Parte B de GHL_CHATBOT_AUTO.md.",
         )
 
     respuesta = ghl_bridge.procesar_mensaje_whatsapp(identificador, mensaje)

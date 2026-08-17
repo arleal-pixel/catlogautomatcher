@@ -245,9 +245,35 @@ Al recibirlo:
   recolectar los datos del conductor (`REGISTROS_ACTIVOS`); si el proceso
   se reinició mientras tanto y se perdió esa referencia en memoria, busca
   el registro más reciente de ese contacto como respaldo.
-- **Ahí sí** agrega el tag `auto-listo-para-agendar` (`agregar_tag`) — este
-  es el que dispara el workflow "Auto - Reactivar y Agendar" (Parte D).
-- Limpia la fase `esperando_cotizacion` localmente.
+- **Le manda el resultado por WhatsApp directo** (`enviar_whatsapp` — a
+  diferencia del resto del puente, aquí sí se llama desde dentro de
+  `ghl_bridge.py`, porque este callback no viene de un mensaje entrante de
+  WhatsApp) con el precio/cobertura si `resultado` los trae, y le pregunta
+  si quiere agendar su cita o cotizar otro vehículo.
+- Pasa al contacto a la fase `cotizacion_lista` — **todavía NO agrega el
+  tag** `auto-listo-para-agendar`. Eso se atrasa a propósito hasta que el
+  cliente confirme que quiere agendar (ver abajo), para que el workflow de
+  reactivación del bot (Parte D) no le gane la conversación a esta
+  pregunta.
+
+### C3 — "¿Agendar o cotizar otro?" (fase `cotizacion_lista`)
+
+Mientras el contacto está en esta fase, `_avanzar_cotizacion_lista`
+interpreta su respuesta:
+
+- **Afirma o menciona agendar/cita/zoom/asesor/llamada** → *ahí sí* se
+  agrega el tag `auto-listo-para-agendar` (dispara Parte D, que reactiva
+  el bot para que use su Appointment Booking nativo) y se libera la fase
+  — el contacto queda libre para cotizar otro vehículo en el futuro sin
+  arrastrar nada de esta cotización.
+- **Menciona "otro"/"cancelar"/"nuevo"** (o escribe literal "otro auto",
+  que ya lo captura `_es_reinicio` antes de llegar aquí, mismo efecto) →
+  cancela esta cotización (NO agrega el tag) y vuelve a pedir vehículo
+  desde cero.
+- **Cualquier otra cosa** (incluido si el cliente describe un vehículo
+  nuevo directo sin decir "otro auto" primero) → le recuerda que ya tiene
+  una cotización lista y le repite las dos opciones, para no perderla por
+  accidente.
 
 Igual que `/ghl/webhook`, tiene un secreto opcional propio —
 `COTIZADOR_AUTO_WEBHOOK_SECRET`, mandado como `?secret=...` o header
@@ -280,6 +306,14 @@ la tengas, prueba primero con `curl` directo a `/cotizador-auto/webhook`
 simulando su callback, antes de conectarlo de punta a punta.
 
 ## Parte D — Workflow "Auto - Reactivar y Agendar"
+
+Nota de timing: el tag que dispara este workflow ya NO se agrega en cuanto
+llega el resultado de la cotización — se agrega hasta que el cliente
+confirma que quiere agendar (fase `cotizacion_lista`, Parte C3). Nuestro
+propio código ya le manda un mensaje de confirmación ("¡Perfecto! Ya te
+dejo con nuestro asistente...") justo antes de agregar el tag, así que el
+paso 4 de abajo (Send Message) es opcional/redundante — puedes dejarlo
+como refuerzo o quitarlo.
 
 1. **Trigger:** `Tag Added` = `auto-listo-para-agendar`.
 2. **Acción: "Update Conversation AI Bot and Status" → Active**, para ese
@@ -363,6 +397,59 @@ evitar. Revisa, en orden:
 Mientras el bot siga activo en paralelo, vas a seguir viendo respuestas
 duplicadas/mezcladas para *cualquier* mensaje durante todo el flujo de
 auto, no solo en la pregunta de la edad.
+
+### Caso real confirmado (Armando, Nissan Sentra)
+
+Un ejemplo real de producción mostró las DOS causas juntas:
+
+1. El vehículo se resolvió bien y pidió el nombre.
+2. Sin que el cliente contestara nada, llegó `"¿Cuál es tu edad?"` -- el
+   webhook se disparó **dos veces para el mismo mensaje** del vehículo, y
+   la segunda ejecución consumió ese mismo texto como si fuera la
+   respuesta al nombre, avanzando de más.
+3. El bot nativo mandó por su cuenta `"Perfecto, vamos a cotizar tu Nissan
+   Sentra Advance automática. Para continuar, ¿me puedes dar tu nombre
+   completo?"` -- el bot seguía activo, sin apagarse.
+4. Cuando el cliente contestó su nombre real (`"Armando Leal"`), nuestro
+   código ya estaba esperando una EDAD (por el paso 2), así que respondió
+   `"No reconocí una edad válida"` -- confuso para el cliente, y el
+   **nombre guardado en el registro no fue el real** (quedó el texto del
+   vehículo).
+5. Al terminar de cotizar, volvió a llegar el mensaje de cierre dos veces
+   (`"¡Listo!..."` seguido de `"Todavía estamos calculando..."` sin que el
+   cliente escribiera nada en medio) -- mismo doble-disparo, ahora en el
+   último mensaje del flujo.
+6. El bot nativo, todavía activo, terminó ofreciendo agendar Zoom
+   directamente (`"¿Quieres que agendemos una videollamada...?"`) -- si el
+   cliente hubiera dicho que sí, se habría agendado una cita ANTES de
+   tener la cotización real lista, saltándose todo el gate del tag
+   `auto-listo-para-agendar`.
+
+**Qué revisar en el panel, en este orden:**
+
+1. La acción **"Trigger a Workflow"** del bot (Parte A, punto 5) -- confirma
+   que apunta exactamente a `Auto - Activar Puente` (B1) y NO directo a
+   `Auto - Cotizar Vehiculo` (B2). Si por error apunta a B2, cada mensaje
+   dispara B2 dos veces: una por su propio trigger `Customer Replied`, y
+   otra por la acción del bot -- esto explica el doble-disparo punto por
+   punto.
+2. Dentro de B1, confirma que la acción **"Update Conversation AI Bot and
+   Status" → Inactive** de verdad corrió (Automation → Workflows → Auto -
+   Activar Puente → History, busca la ejecución de ese contacto).
+3. Como agregamos un resguardo de software contra el doble-disparo (ver
+   abajo), si sigue apareciendo el mensaje de error `"Mensaje duplicado"`
+   en los logs de Railway seguido, es señal de que el punto 1 sigue mal
+   configurado -- el resguardo evita que corrompa datos, pero no arregla
+   la causa raíz en GHL.
+
+**Resguardo agregado del lado del código:** `/ghl/webhook` ahora descarta
+automáticamente el mismo `(contact_id, mensaje)` si llega dos veces en
+menos de 6 segundos -- no vuelve a procesar el mensaje ni a mandar
+respuesta duplicada. Esto evita la corrupción de datos (nombre/edad/CP
+corridos) aunque el workflow siga mal configurado, pero **no apaga el bot
+nativo** -- para eso sigue haciendo falta arreglar los puntos 1 y 2 de
+arriba, o seguirás viendo los mensajes "de más" que manda el bot en
+paralelo.
 
 ## Mientras no exista la API real: modo demo
 

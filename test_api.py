@@ -365,16 +365,55 @@ check(d["ok"] and "todavía estamos calculando" in d["respuesta"].lower()
       f"mensaje durante la espera no se trata como vehiculo nuevo (obtuvo {d})")
 
 # llega el callback de la (futura) API de cotizacion -> /cotizador-auto/webhook
+n_enviados_antes = len(enviados)
 r = client.post("/cotizador-auto/webhook", json={
-    "contact_id": "ghl-c3", "resultado": {"precio": 12345.67, "cobertura": "amplia"},
+    "contact_id": "ghl-c3", "resultado": {"precio": 12345.67, "cobertura": "amplia", "moneda": "MXN"},
 })
 d = r.json()
-check(d["contact_id"] == "ghl-c3" and "ghl-c3" not in gb.CONVERSACIONES,
-      f"/cotizador-auto/webhook limpia la fase 'esperando_cotizacion' del contacto (obtuvo {d}, "
+check(d["contact_id"] == "ghl-c3"
+      and gb.CONVERSACIONES.get("ghl-c3", {}).get("fase") == "cotizacion_lista",
+      f"/cotizador-auto/webhook pasa la fase de 'esperando_cotizacion' a 'cotizacion_lista' (obtuvo {d}, "
       f"quedo={gb.CONVERSACIONES.get('ghl-c3')})")
 # ok=False es esperado aqui: no hay GHL_API_TOKEN en este entorno de pruebas,
-# asi que actualizar_registro_cotizacion/agregar_tag fallan -- lo que importa
-# es que no tumbo el proceso y limpio el estado local igual.
+# asi que actualizar_registro_cotizacion falla -- lo que importa es que no
+# tumbo el proceso y de todos modos le mando el resultado por WhatsApp.
+check(len(enviados) == n_enviados_antes + 1 and "12,345.67" in enviados[-1][1]
+      and "agendemos" in enviados[-1][1].lower(),
+      f"el resultado de la cotizacion SI se manda por WhatsApp con precio y la pregunta de agendar "
+      f"(obtuvo {enviados[-1] if enviados else None})")
+
+# cliente contesta algo ambiguo -- se le recuerda que ya tiene cotizacion pendiente
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "hola"})
+d = r.json()
+check(d["ok"] and "ya tenemos una cotización lista" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-c3", {}).get("fase") == "cotizacion_lista",
+      f"respuesta ambigua en 'cotizacion_lista' recuerda la cotizacion pendiente, no la pierde (obtuvo {d})")
+
+# cliente confirma que quiere agendar -> se agrega el tag AHORA (no antes) y se libera la fase
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "si, agendemos"})
+d = r.json()
+check(d["ok"] and "agendar tu cita" in d["respuesta"].lower()
+      and "ghl-c3" not in gb.CONVERSACIONES,
+      f"confirmar agendar libera la fase (el contacto puede cotizar otro auto despues) (obtuvo {d})")
+
+print("   (nota: 'agregar_tag' internamente falla por falta de GHL_API_TOKEN en pruebas -- "
+      "lo que importa aqui es la respuesta al cliente y que la fase se libera igual)")
+
+# "otro auto" cancela la cotizacion pendiente SIN agregar el tag, y pide vehiculo nuevo
+gb.CONVERSACIONES["ghl-otro"] = {"fase": "esperando_cotizacion",
+                                  "vehiculo": {"marca": "TOYOTA", "descripcion": "COROLLA LE"}, "datos": {}}
+gb.recibir_resultado_cotizacion("ghl-otro", {"precio": 999.0, "moneda": "MXN"})
+check(gb.CONVERSACIONES.get("ghl-otro", {}).get("fase") == "cotizacion_lista",
+      "recibir_resultado_cotizacion deja al contacto en 'cotizacion_lista'")
+
+# nota: la frase EXACTA "otro auto" ya la intercepta _es_reinicio (reinicio
+# global, cualquier fase) antes de llegar aqui -- mismo efecto neto. Se
+# prueba con una frase distinta para ejercitar la rama propia de
+# _avanzar_cotizacion_lista.
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-otro", "mensaje": "cancela por favor"})
+d = r.json()
+check(d["ok"] and "cancelamos" in d["respuesta"].lower() and "ghl-otro" not in gb.CONVERSACIONES,
+      f"cancelar la cotizacion pendiente libera la fase (obtuvo {d})")
 
 # --- reutilizar datos del conductor si ya cotizo antes (evita re-preguntar) ---
 # obtener_datos_conductor() normalmente lee esto del Custom Object en GHL
@@ -468,6 +507,37 @@ r = client.post("/ghl/webhook", json={"contact_id": "ghl-c4", "mensaje": "reinic
 d = r.json()
 check(d["ok"] and "ghl-c4" not in gb.CONVERSACIONES,
       f"'reiniciar' limpia la sesion (obtuvo {d}, quedo={gb.CONVERSACIONES.get('ghl-c4')})")
+
+# --- resguardo anti-duplicados: el mismo (contact_id, mensaje) dos veces
+# seguidas no debe procesarse dos veces (caso real: workflow de GHL
+# disparando el webhook dos veces por el mismo mensaje del cliente,
+# corrompiendo nombre/edad/CP -- ver GHL_CHATBOT_AUTO.md) ---
+gb.CONVERSACIONES.clear()
+r1 = client.post("/ghl/webhook", json={"contact_id": "ghl-dup", "mensaje": "corolla cross 2024"})
+d1 = r1.json()
+check(d1["ok"] and d1["respuesta"], f"primer mensaje se procesa normal (obtuvo {d1})")
+
+r2 = client.post("/ghl/webhook", json={"contact_id": "ghl-dup", "mensaje": "corolla cross 2024"})
+d2 = r2.json()
+check(d2["ok"] and d2["enviado"] is False and d2["respuesta"] is None and "duplicado" in (d2.get("error") or "").lower(),
+      f"el MISMO mensaje repetido de inmediato se ignora, no avanza el estado dos veces (obtuvo {d2})")
+
+# un mensaje DISTINTO del mismo contacto sí se procesa normal (el resguardo
+# es por texto exacto, no bloquea al contacto entero) -- y si el duplicado
+# de arriba hubiera corrompido la sesion (ej. creando una segunda sesion o
+# saltandose un paso), esta respuesta ya no resolveria limpio a "xle".
+r3 = client.post("/ghl/webhook", json={"contact_id": "ghl-dup", "mensaje": "xle"})
+d3 = r3.json()
+check(d3["ok"] and d3["enviado"] and gb.CONVERSACIONES.get("ghl-dup", {}).get("fase") == "datos_conductor",
+      f"un mensaje distinto del mismo contacto se procesa normal y resuelve limpio, sin duplicar sesion (obtuvo {d3})")
+
+# ?dry_run=true no aplica el resguardo (para poder reintentar a mano al depurar)
+gb.CONVERSACIONES.clear()
+client.post("/ghl/webhook?dry_run=true", json={"contact_id": "ghl-dup2", "mensaje": "jetta 2020"})
+r4 = client.post("/ghl/webhook?dry_run=true", json={"contact_id": "ghl-dup2", "mensaje": "jetta 2020"})
+d4 = r4.json()
+check(d4["ok"] and d4["respuesta"] is not None,
+      f"dry_run no aplica el resguardo anti-duplicados (obtuvo {d4})")
 
 print()
 print("=== TODO OK ===")

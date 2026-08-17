@@ -293,8 +293,20 @@ def recibir_resultado_cotizacion(contact_id: str, resultado: dict) -> bool:
     contrato real (ej. separar precio/cobertura en sus propias
     propiedades).
 
-    Marca al contacto como listo para agendar -- esto es lo que dispara el
-    workflow "Auto - Reactivar y Agendar" (ver GHL_CHATBOT_AUTO.md)."""
+    A diferencia de antes, esto YA NO manda al contacto directo al tag de
+    "listo para agendar" -- primero le manda el resultado por WhatsApp y
+    le pregunta si quiere agendar o cotizar otro vehiculo (fase
+    'cotizacion_lista', ver _avanzar_cotizacion_lista). El tag se agrega
+    solo cuando confirma que quiere agendar -- asi el workflow de
+    reactivacion del bot (Parte D de GHL_CHATBOT_AUTO.md) no le gana la
+    conversacion a esta pregunta.
+
+    A diferencia del resto del puente, este SI manda el WhatsApp
+    directamente (via enviar_whatsapp) en vez de devolver el texto a un
+    caller -- porque no hay ningun mensaje entrante de WhatsApp disparando
+    esto, es un callback aparte de la API de cotizacion."""
+    conv_previa = CONVERSACIONES.get(contact_id) or {}
+    vehiculo = conv_previa.get("vehiculo") or {}
     record_id = REGISTROS_ACTIVOS.pop(contact_id, None)
     CONVERSACIONES.pop(contact_id, None)  # limpia 'esperando_cotizacion' si seguia ahi
 
@@ -303,6 +315,7 @@ def recibir_resultado_cotizacion(contact_id: str, resultado: dict) -> bool:
     except (TypeError, ValueError):
         resultado_txt = str(resultado)[:5000]
 
+    guardado_ok = True
     try:
         if not record_id:
             # el proceso se reinicio (o REGISTROS_ACTIVOS se perdio por
@@ -314,15 +327,29 @@ def recibir_resultado_cotizacion(contact_id: str, resultado: dict) -> bool:
         if not record_id:
             raise GHLError(f"no encontre ningun registro del Custom Object para {contact_id}")
         actualizar_registro_cotizacion(record_id, {"auto_cotizacion_resultado": resultado_txt})
-        agregar_tag(contact_id, TAG_LISTO_PARA_AGENDAR)
     except Exception as e:
         # Revisa los logs de Railway (busca "[cotizador-auto-webhook]") si el
         # flujo se queda trabado despues de "estamos calculando" -- el error
         # real de GHL (scope faltante, registro no encontrado, etc.)
         # aparece aqui.
-        print(f"[cotizador-auto-webhook] fallo guardando resultado/tag en GHL para {contact_id}: {e}")
-        return False
-    return True
+        print(f"[cotizador-auto-webhook] fallo guardando resultado en GHL para {contact_id}: {e}")
+        guardado_ok = False
+
+    CONVERSACIONES[contact_id] = {
+        "fase": "cotizacion_lista",
+        "vehiculo": vehiculo,
+        "record_id": record_id,
+        "resultado": resultado,
+        "actualizado": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        texto = _formatear_resultado_cotizacion(vehiculo, resultado if isinstance(resultado, dict) else {})
+        enviar_whatsapp(contact_id, texto)
+    except Exception as e:
+        print(f"[cotizador-auto-webhook] fallo mandando el resultado por WhatsApp a {contact_id}: {e}")
+
+    return guardado_ok
 
 
 def _es_reinicio(texto: str) -> bool:
@@ -414,6 +441,78 @@ _PREGUNTAS_CONDUCTOR = {
     "edad": "¿Cuál es tu edad?",
     "cp": "¿Cuál es tu código postal (5 dígitos)?",
 }
+
+
+def _formatear_resultado_cotizacion(vehiculo: dict, resultado: dict) -> str:
+    """Arma el mensaje de WhatsApp con el resultado de la cotizacion + la
+    pregunta de agendar/cotizar otro (ver recibir_resultado_cotizacion).
+
+    `resultado` es lo que mande la API del asegurador -- forma exacta TBD
+    (ver COTIZADOR_AUTO_CONTRATO.md), asi que esto se arma de forma
+    defensiva: si trae "precio" numerico lo muestra bonito con moneda y
+    cobertura si las trae; si no, un mensaje generico que igual deja claro
+    que ya hay una cotizacion lista."""
+    vehiculo = vehiculo or {}
+    encabezado = f"{vehiculo.get('marca') or ''} {vehiculo.get('descripcion') or ''}".strip() or "tu vehículo"
+
+    precio = resultado.get("precio") if isinstance(resultado, dict) else None
+    if isinstance(precio, (int, float)):
+        moneda = resultado.get("moneda") or "MXN"
+        lineas = [f"¡Tu cotización está lista para *{encabezado}*!",
+                  f"Precio: ${precio:,.2f} {moneda}"]
+        if resultado.get("cobertura"):
+            lineas.append(f"Cobertura: {resultado['cobertura']}")
+        if resultado.get("demo"):
+            lineas.append("_(cotización de prueba -- no es un precio final)_")
+        cuerpo = "\n".join(lineas)
+    else:
+        cuerpo = f"Ya tenemos tu cotización lista para *{encabezado}*."
+
+    return (cuerpo + "\n\n¿Quieres que agendemos tu cita con un asesor, o prefieres "
+            "cotizar otro vehículo? Responde \"agendar\" u \"otro auto\".")
+
+
+def _avanzar_cotizacion_lista(contact_id: str, conv: dict, texto: str) -> str:
+    """Procesa la respuesta del cliente cuando ya tiene una cotizacion
+    lista y le preguntamos si quiere agendar o cotizar otro vehiculo (ver
+    recibir_resultado_cotizacion).
+
+    - Afirmar / mencionar agendar-cita-zoom-asesor -> AHORA SI se agrega
+      el tag auto-listo-para-agendar (antes se agregaba en cuanto llegaba
+      el resultado -- se atrasa a proposito hasta esta confirmacion, para
+      que el workflow de reactivacion del bot, Parte D, no le gane la
+      conversacion a esta pregunta). Se libera la fase -- el contacto
+      puede cotizar otro vehiculo en el futuro sin arrastrar nada de esto.
+    - Mencionar "otro"/"cancelar"/"nuevo auto" -> cancela esta cotizacion
+      (no agrega el tag) y vuelve a pedir vehiculo.
+    - Cualquier otra cosa (incluido describir un vehiculo nuevo directo,
+      sin decir "otro auto" primero) -> le recuerda que ya tiene una
+      cotizacion pendiente, para no perderla por accidente."""
+    t = disc.normalizar(texto)
+    palabras = set(t.split())
+
+    # "AGEND" (no "AGENDAR"/"AGENDA" sueltos) para cubrir "agendemos",
+    # "agendala", etc. -- y se revisa palabra por palabra si es afirmacion
+    # en vez de t completo, porque frases naturales como "si, agendemos"
+    # no calzan como match exacto contra disc._AFIRMACIONES.
+    if (palabras & disc._AFIRMACIONES) or "AGEND" in t or any(p in t for p in ("CITA", "ZOOM", "ASESOR", "LLAMADA")):
+        try:
+            agregar_tag(contact_id, TAG_LISTO_PARA_AGENDAR)
+        except Exception as e:
+            print(f"[cotizacion-lista] fallo agregando tag '{TAG_LISTO_PARA_AGENDAR}' para {contact_id}: {e}")
+        CONVERSACIONES.pop(contact_id, None)
+        return ("¡Perfecto! Ya te dejo con nuestro asistente para agendar tu cita "
+                "con un asesor por Zoom.")
+
+    if "OTRO" in t or "CANCEL" in t or "NUEVO" in t:
+        CONVERSACIONES.pop(contact_id, None)
+        return "Perfecto, cancelamos esa cotización. ¿Qué marca, modelo y año quieres cotizar ahora?"
+
+    vehiculo = conv.get("vehiculo") or {}
+    encabezado = f"{vehiculo.get('marca') or ''} {vehiculo.get('descripcion') or ''}".strip() or "tu vehículo"
+    return (f"Ya tenemos una cotización lista para *{encabezado}*. "
+            "¿Deseas cancelarla y cotizar otro vehículo, o agendar tu cita? "
+            "Responde \"agendar\" u \"otro auto\".")
 
 
 def _iniciar_datos_conductor(contact_id: str, vehiculo: dict) -> str:
@@ -622,6 +721,11 @@ def procesar_mensaje_whatsapp(contact_id: str, texto: str, tablota_id: Optional[
         return ("Todavía estamos calculando tu cotización con la aseguradora -- en cuanto esté "
                 "lista te contacto. Si quieres cotizar otro vehículo mientras tanto, escribe "
                 "\"reiniciar\".")
+
+    # Cotizacion lista, esperando que el cliente diga si quiere agendar o
+    # cotizar otro vehiculo (ver recibir_resultado_cotizacion).
+    if conv and conv.get("fase") == "cotizacion_lista":
+        return _avanzar_cotizacion_lista(contact_id, conv, texto)
 
     # Ya hay una sesion viva -> el mensaje es la respuesta a la pregunta pendiente.
     if conv and conv.get("session_id") in api.SESIONES:
