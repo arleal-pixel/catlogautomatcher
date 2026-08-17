@@ -415,6 +415,17 @@ d = r.json()
 check(d["ok"] and "cancelamos" in d["respuesta"].lower() and "ghl-otro" not in gb.CONVERSACIONES,
       f"cancelar la cotizacion pendiente libera la fase (obtuvo {d})")
 
+# caso real confirmado en produccion: el cliente ya confirmo "agendar" (la
+# fase 'cotizacion_lista' ya se limpio) pero manda un mensaje de
+# seguimiento como "agendar zoom" antes de que el workflow de GHL note el
+# tag nuevo -- no debe caer al flujo de "no pude identificar vehiculo".
+assert "ghl-carrera" not in gb.CONVERSACIONES
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-carrera", "mensaje": "agendar zoom"})
+d = r.json()
+check(d["ok"] and "cita en proceso" in d["respuesta"].lower()
+      and "no pude identificar" not in d["respuesta"].lower(),
+      f"mensaje de seguimiento tipo 'agendar zoom' sin sesion viva no se confunde con un vehiculo (obtuvo {d})")
+
 # --- reutilizar datos del conductor si ya cotizo antes (evita re-preguntar) ---
 # obtener_datos_conductor() normalmente lee esto del Custom Object en GHL
 # (chatbotprinciap); en pruebas se mockea igual que enviar_whatsapp, ya que

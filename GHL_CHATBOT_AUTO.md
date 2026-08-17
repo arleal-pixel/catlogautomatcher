@@ -451,6 +451,31 @@ nativo** -- para eso sigue haciendo falta arreglar los puntos 1 y 2 de
 arriba, o seguirás viendo los mensajes "de más" que manda el bot en
 paralelo.
 
+### Caso real confirmado #2 (mensaje de seguimiento tras "agendar")
+
+Un contacto completó el flujo normal (vehículo → datos → cotización) y
+recibió la pregunta de C3. Contestó `"agendar"` y le llegó correctamente
+`"¡Perfecto! Ya te dejo con nuestro asistente..."` -- el tag se agregó y
+la fase se liberó, tal como se espera. Segundos después, mandó un segundo
+mensaje de seguimiento (`"agendar zoom"`) y le llegó `"No pude identificar
+marca, modelo ni año..."` -- como si estuviera empezando de cero.
+
+**Causa:** no es un bug de lógica -- el primer mensaje sí se procesó bien.
+Lo que pasó fue que el workflow B2 (filtro "Doesn't have tag:
+auto-listo-para-agendar") todavía no había notado el tag nuevo cuando
+llegó el segundo mensaje (unos segundos de rezago entre que este código
+agrega el tag vía API y que el filtro del trigger de GHL lo detecta), así
+que B2 lo siguió mandando a `/ghl/webhook` -- y como nuestra fase ya
+estaba limpia (a propósito, para dejar al contacto libre de cotizar otro
+auto), el mensaje cayó al flujo por default que intenta leerlo como
+marca/modelo/año.
+
+**Resguardo agregado:** si llega un mensaje sin ninguna fase activa que
+mencione "agendar/cita/zoom/asesor", ya no se intenta leer como vehículo
+-- se responde `"¡Ya quedó tu cita en proceso, un asesor te contacta
+pronto!..."` en su lugar. No hace falta ningún cambio del lado de GHL para
+esto; es puramente defensivo del lado del código.
+
 ## Mientras no exista la API real: modo demo
 
 Hay una API de cotización **demo** ya integrada (`demo_cotizador_auto.py`,

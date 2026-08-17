@@ -39,10 +39,11 @@ GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
 # real (GET /objects/custom_objects.chatbotprinciap?fetchProperties=true):
 # el objeto se llama "chatbotprinciap" y sus campos (todos TEXT salvo
 # auto_cotizacion_resultado que es LARGE_TEXT) son: contacto,
-# vehiculo_clave, conductor_nombre, conductor_edad,
-# conductor_codigo_postal, auto_cotizacion_resultado. "contacto" es un
-# campo de texto normal (NO una asociacion nativa de GHL) donde guardamos
-# el contactId -- por eso las busquedas de abajo filtran por ese valor.
+# vehiculo_clave, vehiculo (descripcion legible, agregado despues),
+# conductor_nombre, conductor_edad, conductor_codigo_postal,
+# auto_cotizacion_resultado. "contacto" es un campo de texto normal (NO
+# una asociacion nativa de GHL) donde guardamos el contactId -- por eso
+# las busquedas de abajo filtran por ese valor.
 GHL_OBJETO_SCHEMA_KEY = os.environ.get("GHL_OBJETO_SCHEMA_KEY", "custom_objects.chatbotprinciap")
 
 # La API de Custom Objects usa un header Version distinto al resto de la
@@ -155,6 +156,7 @@ def crear_registro_cotizacion(contact_id: str, vehiculo: dict, datos_conductor: 
     propiedades = {
         "contacto": contact_id,
         "vehiculo_clave": vehiculo.get("clave") or "",
+        "vehiculo": f"{vehiculo.get('marca') or ''} {vehiculo.get('descripcion') or ''}".strip(),
         "conductor_nombre": datos_conductor.get("nombre") or "",
         "conductor_edad": str(datos_conductor.get("edad") or ""),
         "conductor_codigo_postal": datos_conductor.get("codigo_postal") or "",
@@ -759,6 +761,21 @@ def procesar_mensaje_whatsapp(contact_id: str, texto: str, tablota_id: Optional[
             return procesar_mensaje_whatsapp(contact_id, texto, tablota_id)
 
         return _avanzar(contact_id, conv, resultado)
+
+    # Caso de carrera: el cliente ya confirmo "agendar" (tag agregado y la
+    # fase 'cotizacion_lista' ya se limpio, ver _avanzar_cotizacion_lista)
+    # pero manda un mensaje de seguimiento ("agendar zoom", repetir
+    # "agendar", etc.) antes de que el workflow de GHL note el tag nuevo y
+    # deje de mandarnos ese mensaje a nosotros (puede haber unos segundos
+    # de rezago entre que agregamos el tag via API y que el filtro del
+    # trigger del workflow lo detecta). Sin este resguardo, ese mensaje
+    # caia al flujo de abajo y se trataba como si fuera una descripcion de
+    # vehiculo, dando una respuesta confusa de "no pude identificar
+    # marca/modelo/año" -- confirmado en vivo (caso Armando, Nissan Sentra).
+    t_agendar = disc.normalizar(texto)
+    if "AGEND" in t_agendar or any(p in t_agendar for p in ("CITA", "ZOOM", "ASESOR")):
+        return ("¡Ya quedó tu cita en proceso, un asesor te contacta pronto! Si quieres "
+                "cotizar otro vehículo, dime marca, modelo y año.")
 
     # Sin sesion viva -> tratar el mensaje como frase libre (marca/modelo/año).
     salida = api._procesar_texto_libre(texto, tablota_id)
