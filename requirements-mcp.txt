@@ -1,0 +1,4 @@
+# Dependencias extra SOLO para mcp_server.py (servidor MCP de prueba para
+# Voice AI de GoHighLevel) -- no hace falta instalarlas para correr la API
+# principal (main.py) ni el puente de WhatsApp (ghl_bridge.py).
+mcp==1.9.4
