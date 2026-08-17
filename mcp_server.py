@@ -94,6 +94,17 @@ def _precio_demo_fn():
     return _precio_demo
 
 
+def _ghl():
+    """Import diferido de ghl_bridge.py -- mismo modulo que ya usa el flujo
+    de WhatsApp para guardar cotizaciones en el Custom Object chatbotprinciap
+    (ver crear_registro_cotizacion). Diferido para que este archivo se pueda
+    seguir importando/corriendo (stdio, --help, etc.) aunque falte httpx o
+    las variables de entorno de GHL -- el error real se atrapa en el
+    try/except del caller, no aqui."""
+    import ghl_bridge as ghl
+    return ghl
+
+
 # ---------------------------------------------------------------------------
 # Modelos de entrada
 # ---------------------------------------------------------------------------
@@ -175,6 +186,21 @@ class CotizarAutoInput(BaseModel):
         ...,
         description="Codigo postal de 5 digitos donde vive el conductor.",
         pattern=r"^\d{5}$",
+    )
+    contact_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "El contactId de GoHighLevel del cliente en esta llamada (pasalo "
+            "como parametro dinamico, ej. {{contact.id}}, en la configuracion "
+            "de esta herramienta dentro de Voice AI). Si se manda, la "
+            "cotizacion queda guardada en GHL (mismo Custom Object "
+            "'chatbotprinciap' que usa WhatsApp, con canal='voz') -- si no se "
+            "manda, la cotizacion se calcula igual pero NO se guarda en GHL."
+        ),
+    )
+    nombre_conductor: Optional[str] = Field(
+        default=None,
+        description="Nombre del conductor (opcional, si el agente ya lo tiene de la llamada) -- solo para guardarlo junto con la cotizacion en GHL.",
     )
 
 
@@ -365,10 +391,16 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
     primero segutrenda_resolver_vehiculo (y segutrenda_elegir_opcion si hace
     falta) para conseguirla.
 
+    Si 'contact_id' viene en la entrada (pasalo como parametro dinamico
+    {{contact.id}} desde Voice AI), esta cotizacion tambien se guarda en GHL
+    -- mismo Custom Object 'chatbotprinciap' que usa el flujo de WhatsApp,
+    con el campo canal='voz' para distinguirlas (ver GHL_VOICE_MCP.md).
+
     Args:
         params (CotizarAutoInput): clave del vehiculo, edad y codigo postal
-            del conductor, y opcionalmente marca/descripcion para que la
-            respuesta salga mas legible.
+            del conductor, opcionalmente marca/descripcion para que la
+            respuesta salga mas legible, y opcionalmente contact_id/
+            nombre_conductor para guardar la cotizacion en GHL.
 
     Returns:
         str: JSON con "precio" (float), "moneda", "cobertura",
@@ -379,11 +411,34 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
         - Esta herramienta no falla por datos de negocio (siempre calcula
           algo) -- solo puede fallar si Pydantic rechaza la entrada (ej.
           codigo postal que no son 5 digitos, edad fuera de 16-99).
+        - Si el guardado en GHL falla (credenciales, red, campo 'canal' que
+          todavia no existe en el objeto), NO se rompe la cotizacion -- el
+          cliente igual recibe su precio, el error solo queda en el log del
+          servidor (mismo patron defensivo que usa ghl_bridge.py con
+          WhatsApp).
     """
     precio_demo = _precio_demo_fn()
     vehiculo = {"clave": params.clave, "marca": params.marca, "descripcion": params.descripcion}
-    conductor = {"edad": params.edad_conductor, "codigo_postal": params.codigo_postal}
+    conductor = {
+        "nombre": params.nombre_conductor,
+        "edad": params.edad_conductor,
+        "codigo_postal": params.codigo_postal,
+    }
     resultado = precio_demo(vehiculo, conductor)
+
+    if params.contact_id:
+        try:
+            ghl = _ghl()
+            ghl.crear_registro_cotizacion(
+                params.contact_id,
+                vehiculo,
+                conductor,
+                canal="voz",
+                resultado_cotizacion=json.dumps(resultado, ensure_ascii=False),
+            )
+        except Exception as e:
+            print(f"[segutrenda_mcp] fallo guardando cotizacion de voz en GHL para {params.contact_id}: {e}")
+
     return json.dumps(resultado, ensure_ascii=False)
 
 

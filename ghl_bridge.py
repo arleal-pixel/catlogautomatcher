@@ -41,9 +41,12 @@ GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
 # auto_cotizacion_resultado que es LARGE_TEXT) son: contacto,
 # vehiculo_clave, vehiculo (descripcion legible, agregado despues),
 # conductor_nombre, conductor_edad, conductor_codigo_postal,
-# auto_cotizacion_resultado. "contacto" es un campo de texto normal (NO
-# una asociacion nativa de GHL) donde guardamos el contactId -- por eso
-# las busquedas de abajo filtran por ese valor.
+# auto_cotizacion_resultado, canal (TEXT, agregado para distinguir
+# "whatsapp" vs "voz" -- ver mcp_server.py y GHL_VOICE_MCP.md; hay que
+# agregarlo a mano en el schema del objeto en GHL antes de usarlo).
+# "contacto" es un campo de texto normal (NO una asociacion nativa de GHL)
+# donde guardamos el contactId -- por eso las busquedas de abajo filtran
+# por ese valor.
 GHL_OBJETO_SCHEMA_KEY = os.environ.get("GHL_OBJETO_SCHEMA_KEY", "custom_objects.chatbotprinciap")
 
 # La API de Custom Objects usa un header Version distinto al resto de la
@@ -142,13 +145,31 @@ def agregar_tag(contact_id: str, tag: str) -> None:
         raise GHLError(f"GHL (add tag) respondio {r.status_code}: {r.text[:300]}")
 
 
-def crear_registro_cotizacion(contact_id: str, vehiculo: dict, datos_conductor: dict) -> Optional[str]:
+def crear_registro_cotizacion(
+    contact_id: str,
+    vehiculo: dict,
+    datos_conductor: dict,
+    canal: str = "whatsapp",
+    resultado_cotizacion: Optional[str] = None,
+) -> Optional[str]:
     """POST /objects/{schemaKey}/records -- crea un registro NUEVO en el
     Custom Object por cada cotizacion (a proposito, no se actualiza uno
     existente) para conservar el historial completo de autos que cotizo
     cada contacto -- ese era el motivo de usar Custom Objects en vez de
     Custom Fields del Contact. "contacto" es requerido por el schema del
     objeto -- ahi guardamos el contactId de GHL como texto plano.
+
+    "canal" identifica por donde entro la cotizacion -- "whatsapp" (default,
+    flujo de _finalizar_datos_conductor) o "voz" (flujo de mcp_server.py,
+    Voice AI). REQUIERE que agregues un campo TEXT llamado "canal" al objeto
+    chatbotprinciap en GHL (Configuracion del objeto -> agregar campo) --
+    sin eso, GHL puede rechazar o ignorar esa propiedad.
+
+    "resultado_cotizacion" es opcional -- si ya tienes el resultado en el
+    momento de crear el registro (ej. el flujo de voz, que es sincrono, a
+    diferencia del flujo de WhatsApp que espera un callback async), se
+    guarda de una en auto_cotizacion_resultado en vez de requerir una
+    llamada aparte a actualizar_registro_cotizacion().
 
     Devuelve el id del registro creado (lo necesita
     recibir_resultado_cotizacion() despues, para saber cual actualizar
@@ -160,7 +181,10 @@ def crear_registro_cotizacion(contact_id: str, vehiculo: dict, datos_conductor: 
         "conductor_nombre": datos_conductor.get("nombre") or "",
         "conductor_edad": str(datos_conductor.get("edad") or ""),
         "conductor_codigo_postal": datos_conductor.get("codigo_postal") or "",
+        "canal": canal,
     }
+    if resultado_cotizacion is not None:
+        propiedades["auto_cotizacion_resultado"] = resultado_cotizacion
     body = {"locationId": GHL_LOCATION_ID, "properties": propiedades}
     with httpx.Client(timeout=15) as client:
         r = client.post(f"{GHL_API_BASE}/objects/{GHL_OBJETO_SCHEMA_KEY}/records",

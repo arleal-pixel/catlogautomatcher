@@ -23,7 +23,33 @@ WhatsApp (no hay un motor de vehiculos nuevo):
 |---|---|
 | `segutrenda_resolver_vehiculo` | Identifica marca/modelo/año/version a partir de una descripcion en lenguaje natural (ej. "Nissan Sentra 2019"). Si hace falta mas info, devuelve una pregunta + `session_id`. |
 | `segutrenda_elegir_opcion` | Continua la resolucion con la respuesta del cliente (usa el `session_id` de la llamada anterior), hasta llegar a `"estado": "resuelto"`. |
-| `segutrenda_cotizar_auto` | Genera una cotizacion **DEMO** (precio inventado pero consistente) dado un vehiculo ya resuelto + edad + código postal del conductor. La API real del asegurador todavia no existe -- ver `COTIZADOR_AUTO_CONTRATO.md`. |
+| `segutrenda_cotizar_auto` | Genera una cotizacion **DEMO** (precio inventado pero consistente) dado un vehiculo ya resuelto + edad + código postal del conductor. La API real del asegurador todavia no existe -- ver `COTIZADOR_AUTO_CONTRATO.md`. Si recibe `contact_id`, además guarda la cotización en GHL (ver abajo). |
+
+## Guardar las cotizaciones de voz en GHL
+
+Por defecto, `segutrenda_cotizar_auto` **no** guarda nada en GHL -- solo
+calcula y responde. Para que sí quede guardada (mismo Custom Object
+`chatbotprinciap` que usa el bot de WhatsApp, con un campo para distinguir
+el canal), hace falta:
+
+1. **Agregar el campo `canal`** al objeto `chatbotprinciap` en GHL
+   (Configuración del objeto → agregar campo → tipo `Text`) -- igual que
+   agregaste el campo `vehiculo` antes. Sin este campo, el guardado puede
+   fallar o ese dato se pierde (no rompe la llamada, ver punto 3).
+2. **Pasar `contact_id` como parámetro dinámico** en la configuración de la
+   herramienta `segutrenda_cotizar_auto` dentro de Voice AI -- usa la
+   variable del contacto que esté llamando, típicamente `{{contact.id}}`
+   (el nombre exacto de la variable puede cambiar según tu panel; búscala
+   donde configuras qué datos le pasa Voice AI a cada Custom Action/MCP
+   tool). Si no la mandas, la cotización se calcula igual pero **no** queda
+   guardada en GHL.
+3. Con eso, cada cotización de voz se guarda como un registro nuevo en
+   `chatbotprinciap` con `canal="voz"` (los de WhatsApp siguen guardándose
+   con `canal="whatsapp"`, sin que tengas que tocar nada de ese flujo) --
+   mismo historial por contacto, un solo objeto, filtrable por canal. Si el
+   guardado falla por cualquier motivo (credenciales, red, el campo `canal`
+   todavía no existe), el cliente de todas formas recibe su cotización --
+   el error solo queda en el log del servidor.
 
 ## Probarlo localmente (antes de desplegar)
 
@@ -96,6 +122,10 @@ tendrias que subir `data/tablotas/default.csv` a ese servicio tambien.
    `segutrenda_resolver_vehiculo`, sigue la conversacion con
    `segutrenda_elegir_opcion` si hace falta, y termina llamando a
    `segutrenda_cotizar_auto`.
+5. Para que esa última llamada quede guardada en GHL, revisa la sección
+   "Guardar las cotizaciones de voz en GHL" arriba -- necesitas mandarle
+   `contact_id` como parámetro dinámico y haber agregado el campo `canal`
+   al objeto `chatbotprinciap`.
 
 ## Notas honestas
 

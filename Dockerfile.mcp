@@ -13,10 +13,15 @@ WORKDIR /app
 
 # Copiamos primero SOLO los requirements -- Docker cachea esta capa, un
 # rebuild que solo toque mcp_server.py no vuelve a bajar nada.
-COPY requirements.txt requirements-mcp.txt ./
+# requirements-ghl.txt (httpx) hace falta porque segutrenda_cotizar_auto
+# ahora puede guardar la cotizacion en GHL via ghl_bridge.py (ver
+# mcp_server.py, parametro contact_id) -- sin esto, ese guardado falla
+# (el resto de la herramienta sigue funcionando, ver el try/except ahi).
+COPY requirements.txt requirements-mcp.txt requirements-ghl.txt ./
 RUN pip install --no-cache-dir \
     -r requirements.txt \
-    -r requirements-mcp.txt
+    -r requirements-mcp.txt \
+    -r requirements-ghl.txt
 
 COPY . .
 
