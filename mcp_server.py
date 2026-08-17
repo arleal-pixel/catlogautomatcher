@@ -27,6 +27,11 @@ Una vez corriendo en una URL publica, pega esa URL en la configuracion de
 Custom Actions / MCP de tu agente de Voice AI en GoHighLevel -- ver
 GHL_VOICE_MCP.md para el paso a paso.
 
+Nota: este archivo tambien se puede usar SIN correrlo standalone -- main.py
+lo importa y lo monta solo en /mcp cuando el paquete "mcp" esta instalado
+(ver requirements-mcp.txt), para servir la API principal y el MCP desde el
+mismo proceso/URL. Ver GHL_VOICE_MCP.md, seccion "Opcion recomendada".
+
 Proteccion (MCP_AUTH_TOKEN):
     Como este servidor queda en una URL publica, soporta proteccion opcional
     por Bearer token -- si la variable de entorno MCP_AUTH_TOKEN esta

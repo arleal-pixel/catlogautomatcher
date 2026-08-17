@@ -14,6 +14,7 @@ import os
 import secrets
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional
 
@@ -42,6 +43,35 @@ try:
 except ImportError:
     ghl_bridge = None
     _GHL_DISPONIBLE = False  # falta httpx -- ver requirements-ghl.txt
+
+# Servidor MCP (ver mcp_server.py y GHL_VOICE_MCP.md) -- se monta DENTRO de
+# esta misma app FastAPI, en /mcp, para no necesitar un segundo servicio de
+# Railway con su propia URL. Import opcional: si falta el paquete "mcp"
+# (ver requirements-mcp.txt), la API principal sigue funcionando igual,
+# nada mas sin el endpoint /mcp.
+try:
+    import mcp_server as _mcp_srv
+    _MCP_DISPONIBLE = True
+except ImportError:
+    _mcp_srv = None
+    _MCP_DISPONIBLE = False  # falta el paquete "mcp" -- ver requirements-mcp.txt
+
+if _MCP_DISPONIBLE:
+    # El servidor MCP trae su propio Mount interno en settings.streamable_http_path
+    # (default "/mcp") -- lo ponemos en "/" para que, al montar TODA la app en
+    # "/mcp" mas abajo, la ruta final quede en /mcp (y no /mcp/mcp).
+    _mcp_srv.mcp.settings.streamable_http_path = "/"
+    _mcp_asgi_app = _mcp_srv.mcp.streamable_http_app()
+
+    # El session manager del servidor MCP necesita que su lifespan corra --
+    # al montarlo como sub-app, FastAPI NO propaga el lifespan de un Mount
+    # automaticamente, hay que combinarlo a mano con el de la app principal
+    # (confirmado en pruebas: sin esto, /mcp responde 404 aunque la ruta
+    # este bien montada).
+    @asynccontextmanager
+    async def _lifespan_combinado(_app: FastAPI):
+        async with _mcp_srv.mcp.session_manager.run():
+            yield
 
 # --------------------------------------------------------------------------
 # Auth por webkey (API key fija de entorno; si no hay, se genera una al
@@ -75,7 +105,19 @@ app = FastAPI(
         "con ejemplos) hasta resolver una sola. Soporta subir tablotas "
         "adicionales."
     ),
+    lifespan=_lifespan_combinado if _MCP_DISPONIBLE else None,
 )
+
+# Monta el servidor MCP en /mcp de esta MISMA app -- un solo servicio de
+# Railway, una sola URL, sirve tanto la API/bot de WhatsApp como el MCP para
+# Voice AI (ver GHL_VOICE_MCP.md). Protegido por MCP_AUTH_TOKEN si esta
+# definido (ver mcp_server.py) -- misma logica de proteccion, un solo lugar.
+if _MCP_DISPONIBLE:
+    if _mcp_srv.MCP_AUTH_TOKEN:
+        _mcp_asgi_app.add_middleware(_mcp_srv._BearerAuthMiddleware, token=_mcp_srv.MCP_AUTH_TOKEN)
+    else:
+        print("[mcp] ADVERTENCIA: MCP_AUTH_TOKEN no esta definido -- /mcp queda ABIERTO, sin autenticacion.")
+    app.mount("/mcp", _mcp_asgi_app)
 
 # API DEMO de cotizacion de auto -- para probar /cotizador-auto/webhook de
 # punta a punta MIENTRAS no existe la API real del asegurador. Ver

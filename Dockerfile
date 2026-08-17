@@ -24,11 +24,12 @@ WORKDIR /app
 # por capas -- mientras no toques estos 3 archivos, un rebuild reusa la
 # capa del pip install entero (no vuelve a bajar nada), aunque hayas
 # cambiado main.py. Por eso el codigo (que cambia seguido) va DESPUES.
-COPY requirements.txt requirements-ocr.txt requirements-ghl.txt ./
+COPY requirements.txt requirements-ocr.txt requirements-ghl.txt requirements-mcp.txt ./
 RUN pip install --no-cache-dir \
     -r requirements.txt \
     -r requirements-ocr.txt \
-    -r requirements-ghl.txt
+    -r requirements-ghl.txt \
+    -r requirements-mcp.txt
 
 COPY . .
 
