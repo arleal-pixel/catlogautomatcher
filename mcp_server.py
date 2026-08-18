@@ -429,15 +429,25 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
     if params.contact_id:
         try:
             ghl = _ghl()
-            ghl.crear_registro_cotizacion(
+            record_id = ghl.crear_registro_cotizacion(
                 params.contact_id,
                 vehiculo,
                 conductor,
                 canal="voz",
                 resultado_cotizacion=json.dumps(resultado, ensure_ascii=False),
             )
+            print(f"[segutrenda_mcp] cotizacion de voz guardada en GHL -- contact_id={params.contact_id} record_id={record_id}")
         except Exception as e:
             print(f"[segutrenda_mcp] fallo guardando cotizacion de voz en GHL para {params.contact_id}: {e}")
+    else:
+        # Sin contact_id no hay a quien asociarle el registro -- esto NO es
+        # un error (la herramienta funciona igual para pruebas o si Voice AI
+        # no esta configurado para mandarlo), pero conviene que quede en el
+        # log para diagnosticar el caso "no veo la cotizacion en GHL": si
+        # nunca aparece NI esta linea NI la de arriba, contact_id
+        # simplemente no esta llegando desde la config de Voice AI.
+        print("[segutrenda_mcp] cotizacion de voz calculada SIN contact_id -- no se guarda en GHL "
+              "(revisa que Voice AI este mandando el parametro contact_id, ej. {{contact.id}}).")
 
     return json.dumps(resultado, ensure_ascii=False)
 
