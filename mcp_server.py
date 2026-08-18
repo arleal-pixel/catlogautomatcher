@@ -469,6 +469,20 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
     contact_id = params.contact_id or _contact_id_header_var.get()
     origen_contact_id = "argumento" if params.contact_id else ("header" if contact_id else None)
 
+    # Caso real confirmado: algunos paneles de GHL NO resuelven merge tags
+    # (ej. {{contact.id}}) cuando se ponen en el campo generico de "Headers"
+    # -- mandan el texto literal tal cual, sin sustituir. Sin este resguardo
+    # eso se guardaria en GHL como si fuera un contactId de verdad (ensucia
+    # el Custom Object y ademas rompe cualquier busqueda futura por
+    # contacto). Si detectamos que "parece" un merge tag sin resolver, lo
+    # tratamos igual que si no hubiera llegado nada.
+    if contact_id and "{{" in contact_id and "}}" in contact_id:
+        print(f"[segutrenda_mcp] ADVERTENCIA: contact_id llego como texto literal sin resolver ('{contact_id}', via {origen_contact_id}) "
+              "-- tu panel de Voice AI no esta sustituyendo esa variable ahi. No se guarda en GHL con ese valor. "
+              "Configura contact_id como parametro de la herramienta (seccion 'MCP Tools', no 'Headers') -- ver GHL_VOICE_MCP.md.")
+        contact_id = None
+        origen_contact_id = None
+
     if contact_id:
         try:
             ghl = _ghl()

@@ -49,6 +49,19 @@ el canal), hace falta:
      lo usa si el argumento de la herramienta viene vacío -- si por
      cualquier motivo llegan los dos, gana el argumento de la herramienta,
      no el header.
+
+   **⚠️ Caso real confirmado:** en al menos una cuenta, poner
+   `{{contact.id}}` en la sección "Headers" NO se resolvió -- GHL mandó el
+   texto literal `"{{contact.id}}"` sin sustituir nada, y por lo tanto NO
+   sirve como identificador real. El servidor detecta esto (busca `{{` y
+   `}}` en el valor recibido) y **no lo guarda** en GHL -- verás en el log
+   `ADVERTENCIA: contact_id llego como texto literal sin resolver`. Si ves
+   ese mensaje, la sección "Headers" de tu panel NO resuelve variables
+   dinámicas por llamada (probablemente solo es para valores fijos, como el
+   `Authorization` de arriba) -- tienes que conseguir el `contact_id` desde
+   la sección de parámetros de la herramienta (`MCP Tools`, más abajo en el
+   mismo panel) en vez de Headers. Si no encuentras esa opción ahí tampoco,
+   mándame captura de esa sección y lo revisamos.
 3. Con eso, cada cotización de voz se guarda como un registro nuevo en
    `chatbotprinciap` con `canal="voz"` (los de WhatsApp siguen guardándose
    con `canal="whatsapp"`, sin que tengas que tocar nada de ese flujo) --

@@ -124,4 +124,23 @@ finally:
 d5 = json.loads(salida5)
 check(len(llamadas) == 1 and llamadas[0]["contact_id"] == "ghl-argumento-gana", f"si vienen los dos, el argumento explicito le gana al header (obtuvo {llamadas})")
 
+# --- caso real confirmado: GHL manda el merge tag SIN resolver ("{{contact.id}}"
+# literal) en vez del contactId real -- no debe guardarse eso en GHL, ni por
+# argumento ni por header.
+llamadas.clear()
+params6 = srv.CotizarAutoInput(clave="01420201624", edad_conductor=28, codigo_postal="06600", contact_id="{{contact.id}}")
+salida6 = run(srv.segutrenda_cotizar_auto(params6))
+d6 = json.loads(salida6)
+check("precio" in d6, "con contact_id como merge tag sin resolver, la cotizacion se sigue calculando")
+check(len(llamadas) == 0, f"NO se guarda en GHL cuando contact_id es un merge tag sin resolver tipo '{{{{contact.id}}}}' (obtuvo {llamadas})")
+
+llamadas.clear()
+token = srv._contact_id_header_var.set("{{ contact.id }}")
+try:
+    params7 = srv.CotizarAutoInput(clave="01420201624", edad_conductor=28, codigo_postal="06600")
+    salida7 = run(srv.segutrenda_cotizar_auto(params7))
+finally:
+    srv._contact_id_header_var.reset(token)
+check(len(llamadas) == 0, f"mismo resguardo cuando el merge tag sin resolver llega por header (obtuvo {llamadas})")
+
 print("\nTodas las pruebas de mcp_server.py pasaron.")
