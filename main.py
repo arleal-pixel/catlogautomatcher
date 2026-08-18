@@ -59,9 +59,10 @@ except ImportError:
 if _MCP_DISPONIBLE:
     # El servidor MCP trae su propio Mount interno en settings.streamable_http_path
     # (default "/mcp") -- lo ponemos en "/" para que, al montar TODA la app en
-    # "/mcp" mas abajo, la ruta final quede en /mcp (y no /mcp/mcp).
+    # "/mcp" mas abajo, la ruta final quede en /mcp (y no /mcp/mcp). Tiene que
+    # pasar ANTES de construir_app_http() (que es quien llama a
+    # streamable_http_app() de verdad, mas abajo).
     _mcp_srv.mcp.settings.streamable_http_path = "/"
-    _mcp_asgi_app = _mcp_srv.mcp.streamable_http_app()
 
     # El session manager del servidor MCP necesita que su lifespan corra --
     # al montarlo como sub-app, FastAPI NO propaga el lifespan de un Mount
@@ -110,14 +111,13 @@ app = FastAPI(
 
 # Monta el servidor MCP en /mcp de esta MISMA app -- un solo servicio de
 # Railway, una sola URL, sirve tanto la API/bot de WhatsApp como el MCP para
-# Voice AI (ver GHL_VOICE_MCP.md). Protegido por MCP_AUTH_TOKEN si esta
-# definido (ver mcp_server.py) -- misma logica de proteccion, un solo lugar.
+# Voice AI (ver GHL_VOICE_MCP.md). construir_app_http() ya deja armados los
+# middlewares de proteccion (Bearer, si MCP_AUTH_TOKEN esta definido) y el
+# respaldo de contact_id via header (ver _ContactIdHeaderMiddleware en
+# mcp_server.py, GHL_VOICE_MCP.md) -- misma logica en un solo lugar, para no
+# tener que mantenerla duplicada entre este archivo y mcp_server.py.
 if _MCP_DISPONIBLE:
-    if _mcp_srv.MCP_AUTH_TOKEN:
-        _mcp_asgi_app.add_middleware(_mcp_srv._BearerAuthMiddleware, token=_mcp_srv.MCP_AUTH_TOKEN)
-    else:
-        print("[mcp] ADVERTENCIA: MCP_AUTH_TOKEN no esta definido -- /mcp queda ABIERTO, sin autenticacion.")
-    app.mount("/mcp", _mcp_asgi_app)
+    app.mount("/mcp", _mcp_srv.construir_app_http())
 
 # API DEMO de cotizacion de auto -- para probar /cotizador-auto/webhook de
 # punta a punta MIENTRAS no existe la API real del asegurador. Ver

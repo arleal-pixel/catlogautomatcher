@@ -94,4 +94,34 @@ salida3 = run(srv.segutrenda_cotizar_auto(params3))
 d3 = json.loads(salida3)
 check("precio" in d3 and "estado" not in d3, "si el guardado en GHL falla, la cotizacion se devuelve igual (no se rompe por eso)")
 
+# --- respaldo: si el argumento contact_id viene vacio pero SI llego como
+# header HTTP (ver _ContactIdHeaderMiddleware/GHL_VOICE_MCP.md), se usa ese
+# -- caso real: Voice AI lo manda en "Headers" (junto a Authorization) en vez
+# de como argumento de la herramienta. Aqui se simula seteando el contextvar
+# directo (la prueba de extremo a extremo con cliente/servidor MCP reales ya
+# se corrio aparte, contra este mismo archivo, y confirmo que el middleware
+# efectivamente llena este contextvar).
+llamadas.clear()
+ghl.crear_registro_cotizacion = _mock_crear_registro_cotizacion
+token = srv._contact_id_header_var.set("ghl-desde-header-1")
+try:
+    params4 = srv.CotizarAutoInput(clave="01420201624", edad_conductor=28, codigo_postal="06600")
+    salida4 = run(srv.segutrenda_cotizar_auto(params4))
+finally:
+    srv._contact_id_header_var.reset(token)
+d4 = json.loads(salida4)
+check("precio" in d4, "con contact_id solo por header, la cotizacion se calcula normal")
+check(len(llamadas) == 1 and llamadas[0]["contact_id"] == "ghl-desde-header-1", f"se guardo usando el contact_id del header como respaldo (obtuvo {llamadas})")
+
+# --- el argumento explicito manda sobre el header si ambos vienen ---
+llamadas.clear()
+token = srv._contact_id_header_var.set("ghl-header-que-no-deberia-usarse")
+try:
+    params5 = srv.CotizarAutoInput(clave="01420201624", edad_conductor=28, codigo_postal="06600", contact_id="ghl-argumento-gana")
+    salida5 = run(srv.segutrenda_cotizar_auto(params5))
+finally:
+    srv._contact_id_header_var.reset(token)
+d5 = json.loads(salida5)
+check(len(llamadas) == 1 and llamadas[0]["contact_id"] == "ghl-argumento-gana", f"si vienen los dos, el argumento explicito le gana al header (obtuvo {llamadas})")
+
 print("\nTodas las pruebas de mcp_server.py pasaron.")

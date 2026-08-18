@@ -36,13 +36,19 @@ el canal), hace falta:
    (Configuración del objeto → agregar campo → tipo `Text`) -- igual que
    agregaste el campo `vehiculo` antes. Sin este campo, el guardado puede
    fallar o ese dato se pierde (no rompe la llamada, ver punto 3).
-2. **Pasar `contact_id` como parámetro dinámico** en la configuración de la
-   herramienta `segutrenda_cotizar_auto` dentro de Voice AI -- usa la
-   variable del contacto que esté llamando, típicamente `{{contact.id}}`
-   (el nombre exacto de la variable puede cambiar según tu panel; búscala
-   donde configuras qué datos le pasa Voice AI a cada Custom Action/MCP
-   tool). Si no la mandas, la cotización se calcula igual pero **no** queda
-   guardada en GHL.
+2. **Pasar `contact_id`.** Hay DOS formas -- usa la que te deje tu panel de
+   Voice AI:
+   - **Como parámetro de la herramienta** (la forma "correcta"): en la
+     configuración de `segutrenda_cotizar_auto` dentro de "MCP Tools" (la
+     lista de parámetros que aparece tras conectar el servidor y darle
+     "Refresh Tools"), busca `contact_id` y mapéalo a `{{contact.id}}`.
+   - **Como header HTTP** (respaldo, si tu panel no deja mapear valores por
+     parámetro de la herramienta -- solo te deja una lista de "Headers"
+     genérica, igual que donde va `Authorization`): agrega ahí un header
+     `contact_id` con valor `{{contact.id}}`. El servidor lo detecta solo y
+     lo usa si el argumento de la herramienta viene vacío -- si por
+     cualquier motivo llegan los dos, gana el argumento de la herramienta,
+     no el header.
 3. Con eso, cada cotización de voz se guarda como un registro nuevo en
    `chatbotprinciap` con `canal="voz"` (los de WhatsApp siguen guardándose
    con `canal="whatsapp"`, sin que tengas que tocar nada de ese flujo) --

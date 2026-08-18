@@ -43,6 +43,7 @@ Proteccion (MCP_AUTH_TOKEN):
     configuracion de Custom Action/MCP (como "Bearer <token>").
 """
 import argparse
+import contextvars
 import json
 import os
 import secrets
@@ -74,6 +75,41 @@ class _BearerAuthMiddleware(BaseHTTPMiddleware):
         if not secrets.compare_digest(recibido, self._esperado):
             return JSONResponse({"error": "unauthorized", "mensaje": "Falta o es invalido el header Authorization: Bearer <token>."}, status_code=401)
         return await call_next(request)
+
+
+# contextvar (no una global simple) porque varias requests pueden procesarse
+# concurrentemente en el mismo proceso -- cada una necesita ver SU PROPIO
+# contact_id, no el de la ultima request que paso por el middleware.
+_contact_id_header_var: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "segutrenda_mcp_contact_id_header", default=None
+)
+
+
+class _ContactIdHeaderMiddleware(BaseHTTPMiddleware):
+    """Recurso de respaldo: si GHL Voice AI no tiene forma de mandar
+    contact_id como argumento de la herramienta (dentro de "MCP Tools"), pero
+    SI lo manda como header HTTP generico (dentro de "Headers", el mismo
+    lugar donde va Authorization), lo leemos de ahi y lo dejamos disponible
+    en un contextvar -- segutrenda_cotizar_auto lo usa como fallback SOLO si
+    el argumento contact_id vino vacio. No pisa el argumento si ya viene
+    lleno -- el argumento explicito de la herramienta manda.
+
+    Acepta tanto "contact_id" como "x-contact-id"/"contactid" (headers HTTP
+    no distinguen mayusculas/minusculas ni guiones bajos vs guiones)."""
+
+    async def dispatch(self, request: Request, call_next):
+        valor = (
+            request.headers.get("contact_id")
+            or request.headers.get("contact-id")
+            or request.headers.get("x-contact-id")
+            or request.headers.get("contactid")
+        )
+        token = _contact_id_header_var.set(valor)
+        try:
+            return await call_next(request)
+        finally:
+            _contact_id_header_var.reset(token)
+
 
 GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
 
@@ -426,30 +462,67 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
     }
     resultado = precio_demo(vehiculo, conductor)
 
-    if params.contact_id:
+    # Si el argumento contact_id vino vacio, checa si llego como header HTTP
+    # (respaldo para cuando la config de Voice AI no deja mapear contact_id
+    # como argumento de la herramienta -- ver _ContactIdHeaderMiddleware).
+    # El argumento explicito SIEMPRE manda si vino lleno.
+    contact_id = params.contact_id or _contact_id_header_var.get()
+    origen_contact_id = "argumento" if params.contact_id else ("header" if contact_id else None)
+
+    if contact_id:
         try:
             ghl = _ghl()
             record_id = ghl.crear_registro_cotizacion(
-                params.contact_id,
+                contact_id,
                 vehiculo,
                 conductor,
                 canal="voz",
                 resultado_cotizacion=json.dumps(resultado, ensure_ascii=False),
             )
-            print(f"[segutrenda_mcp] cotizacion de voz guardada en GHL -- contact_id={params.contact_id} record_id={record_id}")
+            print(f"[segutrenda_mcp] cotizacion de voz guardada en GHL -- contact_id={contact_id} (via {origen_contact_id}) record_id={record_id}")
         except Exception as e:
-            print(f"[segutrenda_mcp] fallo guardando cotizacion de voz en GHL para {params.contact_id}: {e}")
+            print(f"[segutrenda_mcp] fallo guardando cotizacion de voz en GHL para {contact_id} (via {origen_contact_id}): {e}")
     else:
         # Sin contact_id no hay a quien asociarle el registro -- esto NO es
         # un error (la herramienta funciona igual para pruebas o si Voice AI
         # no esta configurado para mandarlo), pero conviene que quede en el
         # log para diagnosticar el caso "no veo la cotizacion en GHL": si
         # nunca aparece NI esta linea NI la de arriba, contact_id
-        # simplemente no esta llegando desde la config de Voice AI.
+        # simplemente no esta llegando -- ni como argumento de la
+        # herramienta ni como header HTTP (ver _ContactIdHeaderMiddleware).
         print("[segutrenda_mcp] cotizacion de voz calculada SIN contact_id -- no se guarda en GHL "
-              "(revisa que Voice AI este mandando el parametro contact_id, ej. {{contact.id}}).")
+              "(revisa que Voice AI este mandando contact_id, ya sea como argumento de la "
+              "herramienta o como header HTTP, ej. {{contact.id}}).")
 
     return json.dumps(resultado, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Armado de la app ASGI (compartido entre --http standalone y el montaje
+# dentro de main.py, para no tener la logica de middlewares duplicada en dos
+# lugares que se puedan desincronizar).
+# ---------------------------------------------------------------------------
+
+def construir_app_http():
+    """Devuelve la app ASGI de streamable-http con los middlewares ya
+    montados: _ContactIdHeaderMiddleware siempre, y _BearerAuthMiddleware
+    solo si MCP_AUTH_TOKEN esta definido. Imprime advertencias/confirmacion
+    por consola en cualquiera de los dos casos."""
+    app = mcp.streamable_http_app()
+
+    # Este va PRIMERO (queda mas "adentro" en la pila de Starlette) --
+    # solo lee un header, no bloquea nada, no importa que corra aunque el
+    # auth rechace despues.
+    app.add_middleware(_ContactIdHeaderMiddleware)
+
+    if MCP_AUTH_TOKEN:
+        app.add_middleware(_BearerAuthMiddleware, token=MCP_AUTH_TOKEN)
+        print("[segutrenda_mcp] proteccion activada -- se exige 'Authorization: Bearer <MCP_AUTH_TOKEN>' en cada request.")
+    else:
+        print("[segutrenda_mcp] ADVERTENCIA: MCP_AUTH_TOKEN no esta definido -- el servidor queda ABIERTO, sin autenticacion. "
+              "Define esa variable de entorno antes de usarlo fuera de pruebas locales.")
+
+    return app
 
 
 # ---------------------------------------------------------------------------
@@ -483,13 +556,7 @@ def main():
         mcp.settings.host = args.host
         mcp.settings.port = args.port
 
-        app = mcp.streamable_http_app()
-        if MCP_AUTH_TOKEN:
-            app.add_middleware(_BearerAuthMiddleware, token=MCP_AUTH_TOKEN)
-            print("[segutrenda_mcp] proteccion activada -- se exige 'Authorization: Bearer <MCP_AUTH_TOKEN>' en cada request.")
-        else:
-            print("[segutrenda_mcp] ADVERTENCIA: MCP_AUTH_TOKEN no esta definido -- el servidor queda ABIERTO, sin autenticacion. "
-                  "Define esa variable de entorno antes de usarlo fuera de pruebas locales.")
+        app = construir_app_http()
 
         print(f"[segutrenda_mcp] sirviendo streamable-http en http://{args.host}:{args.port}{mcp.settings.streamable_http_path}")
         uvicorn.run(app, host=args.host, port=args.port, log_level=mcp.settings.log_level.lower())
