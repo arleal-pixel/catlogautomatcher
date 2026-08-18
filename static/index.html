@@ -592,5 +592,15 @@ $("btnSubir").addEventListener("click", async ()=>{
   }catch(e){ $("subirResultado").textContent = "Error de red: " + e.message; }
 });
 </script>
+
+<!-- Widget de chat/voz de GoHighLevel -- SOLO para pruebas del cotizador por
+     audio (ver GHL_VOICE_MCP.md). A diferencia del "Web Call" del simulador
+     de Voice AI (que no esta ligado a ningun Contacto real), este widget
+     corre dentro de una pagina real -- si el visitante ya tiene cookies/
+     sesion de un Contacto de GHL, o si el widget crea un Contacto nuevo al
+     abrirse, deberia tener un contact.id real para pasarle a la herramienta
+     segutrenda_cotizar_auto. Quitar esta linea si no se quiere el widget
+     visible en el probador (no es parte del cotizador de texto de arriba). -->
+<script src="https://widgets.leadconnectorhq.com/loader.js" data-resources-url="https://widgets.leadconnectorhq.com/chat-widget/loader.js" data-widget-id="6a83af3c7eb38cd3ac94aca3"></script>
 </body>
 </html>
