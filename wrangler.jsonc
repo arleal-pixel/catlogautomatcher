@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "catlogautomatcher",
+  "main": "src/index.js",
+  // Deja esto como la fecha de hoy cuando lo despliegues
+  "compatibility_date": "2026-08-15",
+
+  "containers": [
+    {
+      "class_name": "ApiContainer",
+      "image": "./Dockerfile",
+      // Cuantas instancias simultaneas como maximo -- 1 alcanza para
+      // empezar (una sola API compartida, no una por usuario)
+      "max_instances": 1
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ApiContainer", "name": "API_CONTAINER" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ApiContainer"] }
+  ]
+}

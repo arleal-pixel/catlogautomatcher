@@ -348,14 +348,30 @@ check(d["ok"] and "no reconocí un código postal" in d["respuesta"].lower() and
       f"CP invalido se re-pregunta sin avanzar (obtuvo {d})")
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "06700"})
 d = r.json()
-check(d["ok"] and "ya tengo todos tus datos" in d["respuesta"].lower()
-      and gb.CONVERSACIONES.get("ghl-c3", {}).get("fase") == "esperando_cotizacion",
-      f"CP valido termina la recoleccion y pasa a esperar la cotizacion (obtuvo {d}, "
+check(d["ok"] and "correo" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-c3", {}).get("fase") == "datos_conductor"
+      and gb.CONVERSACIONES["ghl-c3"]["paso"] == "correo",
+      f"CP valido pasa al ultimo paso, pedir correo (obtuvo {d}, "
       f"quedo={gb.CONVERSACIONES.get('ghl-c3')})")
-# nota: como COTIZADOR_AUTO_URL no esta configurado en este entorno de
-# pruebas, el mensaje es la variante "un asesor va a revisar" (enviado=False
-# dentro de _finalizar_datos_conductor) -- ambas variantes dejan la fase en
-# 'esperando_cotizacion', que es lo que importa aqui.
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "no tengo"})
+d = r.json()
+check(d["ok"] and "no reconocí un correo válido" in d["respuesta"].lower()
+      and "ghl-c3" in gb.CONVERSACIONES,
+      f"correo invalido se re-pregunta sin avanzar (obtuvo {d})")
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "juan.perez@ejemplo.com"})
+d = r.json()
+check(d["ok"] and "ya tengo todos tus datos" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-c3", {}).get("fase") == "esperando_cotizacion"
+      and gb.CONVERSACIONES["ghl-c3"]["datos"]["correo"] == "juan.perez@ejemplo.com",
+      f"correo valido termina la recoleccion y pasa a esperar la cotizacion (obtuvo {d}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-c3')})")
+# nota: como COTIZADOR_AUTO_URL/SEGUPOLIZA_TOKEN no estan configurados en
+# este entorno de pruebas, el mensaje es la variante "un asesor va a
+# revisar" (enviado=False dentro de _finalizar_datos_conductor) -- ambas
+# variantes dejan la fase en 'esperando_cotizacion', que es lo que importa
+# aqui.
 
 # mientras espera la cotizacion, cualquier mensaje nuevo se contesta con "todavia estamos calculando"
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-c3", "mensaje": "ya esta?"})
@@ -443,9 +459,16 @@ check(gb.CONVERSACIONES.get("ghl-repetido", {}).get("fase") == "confirmar_datos_
 
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-repetido", "mensaje": "si"})
 d = r.json()
+check(d["ok"] and "correo" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-repetido", {}).get("fase") == "datos_conductor"
+      and gb.CONVERSACIONES["ghl-repetido"]["paso"] == "correo",
+      f"confirmar con 'si' sin correo guardado de antes lo pide una sola vez (obtuvo {d})")
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-repetido", "mensaje": "ana@ejemplo.com"})
+d = r.json()
 check(d["ok"] and "ya tengo todos tus datos" in d["respuesta"].lower()
       and gb.CONVERSACIONES.get("ghl-repetido", {}).get("fase") == "esperando_cotizacion",
-      f"confirmar con 'si' cotiza directo sin re-pedir nada (obtuvo {d})")
+      f"dar el correo faltante finaliza directo, sin re-pedir nombre/edad/CP (obtuvo {d})")
 
 # cambiar solo un campo (edad) sin perder nombre/CP ya confirmados
 gb.CONVERSACIONES.clear()

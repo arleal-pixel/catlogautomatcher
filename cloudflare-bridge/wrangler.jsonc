@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "asegurador-bridge",
+  "main": "src/index.js",
+  // Deja esto como la fecha de hoy cuando lo despliegues
+  "compatibility_date": "2026-08-15",
+
+  // Rellena esto cuando tengas el tunnel + VPC Service creados (ver el
+  // plan paso a paso). Sin esto, "wrangler deploy" falla.
+  "vpc_services": [
+    {
+      "binding": "API_INTERNO",
+      "service_id": "PON_AQUI_EL_SERVICE_ID",
+      "remote": true
+    }
+  ]
+}

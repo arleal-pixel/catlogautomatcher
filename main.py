@@ -197,6 +197,7 @@ class CandidataOut(BaseModel):
     clave: str
     descripcion: str
     marca: Optional[str] = None
+    anio: Optional[str] = None
 
 
 class PreguntaOut(BaseModel):
@@ -213,6 +214,7 @@ class ResultadoOut(BaseModel):
     clave: Optional[str] = None
     descripcion: Optional[str] = None
     marca: Optional[str] = None
+    anio: Optional[str] = None
     candidatas_restantes: int = 0
     pregunta: Optional[PreguntaOut] = None
     valores_posibles: Optional[List[str]] = None      # en 'aclaracion'
@@ -308,7 +310,7 @@ class CotizadorAutoWebhookOut(BaseModel):
 # Helpers
 # --------------------------------------------------------------------------
 def _cout(c: dict) -> CandidataOut:
-    return CandidataOut(clave=c["clave"], descripcion=c["descripcion"], marca=c.get("marca"))
+    return CandidataOut(clave=c["clave"], descripcion=c["descripcion"], marca=c.get("marca"), anio=c.get("anio"))
 
 
 def _anio_sort_key(a: str):
@@ -343,6 +345,7 @@ def _evaluar(sid: str) -> ResultadoOut:
         return ResultadoOut(
             session_id=sid, estado="resuelto",
             clave=info["clave"], descripcion=info["descripcion"], marca=info.get("marca"),
+            anio=info.get("anio"),
             candidatas_restantes=1, preguntas_hechas=len(ses["historial"]),
             modelo_resuelto=modelo_resuelto,
         )
@@ -1260,7 +1263,7 @@ async def ghl_webhook(request: Request, dry_run: bool = False):
                   "Parte B de GHL_CHATBOT_AUTO.md.",
         )
 
-    respuesta = ghl_bridge.procesar_mensaje_whatsapp(identificador, mensaje)
+    respuesta = ghl_bridge.procesar_mensaje_whatsapp(identificador, mensaje, telefono=telefono)
 
     if dry_run or not contact_id:
         return GHLWebhookOut(
@@ -1280,21 +1283,25 @@ async def ghl_webhook(request: Request, dry_run: bool = False):
 
 @app.post("/cotizador-auto/webhook", response_model=CotizadorAutoWebhookOut)
 async def cotizador_auto_webhook(request: Request):
-    """Callback de la API de cotizacion de auto del asegurador -- AUN NO
-    EXISTE (ver COTIZADOR_AUTO_URL en ghl_bridge.py). Cuando esa API termine
-    de calcular el precio, debe mandar un POST aqui con el resultado.
+    """Callback del resultado de la cotizacion de auto -- soporta DOS
+    contratos distintos, detectados por la forma del body:
 
-    Body esperado (ajusta cuando definas el contrato real de esa API):
+    1) Contrato REAL de Segupoliza (ver COTIZADOR_AUTO_CONTRATO.md y
+       'response ghl.json'): un payload con top-level "prospecto"
+       (nombre/whatsapp/etc.), "primas" (hasta 5 opciones de aseguradora) y
+       "objeto_seguro". NO trae contact_id ni un folio/id confiable -- la
+       correlacion contra la conversacion se hace por telefono
+       (prospecto.whatsapp), ver
+       ghl_bridge.recibir_resultado_cotizacion_segupoliza().
 
-        {"contact_id": "...", "resultado": {"precio": ..., "cobertura": ..., ...}}
+    2) Contrato viejo/demo (compatibilidad con demo_cotizador_auto.py /
+       probar_cotizador_demo.py): {"contact_id": "...", "resultado": {...}}
+       -- se sigue soportando para no romper las pruebas manuales del flujo
+       demo. Ver ghl_bridge.recibir_resultado_cotizacion().
 
     Si definiste COTIZADOR_AUTO_WEBHOOK_SECRET en el entorno, hay que
     mandarlo como ?secret=... o header X-Cotizador-Secret -- igual que
-    GHL_WEBHOOK_SECRET en /ghl/webhook.
-
-    Guarda el resultado en el registro de esa cotizacion dentro del Custom
-    Object chatbotprinciap y lo marca como listo para agendar (tag
-    auto-listo-para-agendar) -- ver GHL_CHATBOT_AUTO.md, Parte D."""
+    GHL_WEBHOOK_SECRET en /ghl/webhook (aplica a ambos contratos)."""
     if not _GHL_DISPONIBLE:
         raise HTTPException(
             status_code=501,
@@ -1317,12 +1324,21 @@ async def cotizador_auto_webhook(request: Request):
 
     contact_id = _extraer_campo(data, "contact_id", "contactId")
     resultado = data.get("resultado")
-    if not contact_id or resultado is None:
+
+    if contact_id and resultado is not None:
+        # contrato viejo/demo
+        ok = ghl_bridge.recibir_resultado_cotizacion(contact_id, resultado)
         return CotizadorAutoWebhookOut(
-            ok=False, contact_id=contact_id,
-            error="Falta 'contact_id' y/o 'resultado' en el body.",
+            ok=ok, contact_id=contact_id,
+            error=None if ok else "No se pudo guardar el resultado en GHL (revisa logs).",
         )
 
-    ok = ghl_bridge.recibir_resultado_cotizacion(contact_id, resultado)
-    return CotizadorAutoWebhookOut(ok=ok, contact_id=contact_id,
-                                    error=None if ok else "No se pudo guardar el resultado en GHL (revisa logs).")
+    if "prospecto" in data:
+        # contrato real de Segupoliza -- sin contact_id, correlacion por telefono
+        salida = ghl_bridge.recibir_resultado_cotizacion_segupoliza(data)
+        return CotizadorAutoWebhookOut(**salida)
+
+    return CotizadorAutoWebhookOut(
+        ok=False, contact_id=contact_id,
+        error="Falta 'contact_id'+'resultado' (contrato demo) o 'prospecto' (contrato Segupoliza) en el body.",
+    )

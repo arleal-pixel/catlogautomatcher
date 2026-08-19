@@ -229,14 +229,26 @@ más — para cambiar varios, hay que hacerlo uno a la vez.
 
 ### C2 — El webhook que recibe el resultado: `POST /cotizador-auto/webhook`
 
-Ya agregué este endpoint en `main.py` — es el que tu futura API de
-cotización debe llamar cuando termine:
+**Actualizado — ya no es un contrato hipotético.** Este endpoint ahora
+soporta DOS contratos, detectados automáticamente por la forma del body:
+el real de Segupoliza (sin `contact_id`, correlacionado por teléfono) y el
+viejo/demo de abajo (`{"contact_id": ..., "resultado": {...}}`, que se
+sigue usando para pruebas locales sin credenciales reales). El detalle
+completo del contrato real (headers, payload de Segupoliza, cómo se
+correlaciona por teléfono, formato del mensaje con las 5 aseguradoras) está
+en `COTIZADOR_AUTO_CONTRATO.md` — esta sección se deja tal cual para
+documentar el mecanismo demo/viejo, que sigue funcionando en paralelo.
+
+También nota: la recolección de datos del conductor ahora incluye un paso
+más al final, **correo electrónico** (después de nombre/edad/código
+postal), necesario para la API real de Segupoliza — mismo patrón de "ya lo
+tengo guardado, no te lo vuelvo a pedir" que el resto de los datos.
 
 ```json
 {"contact_id": "...", "resultado": {"precio": 12345.67, "cobertura": "amplia", "...": "lo que sea"}}
 ```
 
-Al recibirlo:
+Al recibirlo (contrato viejo/demo):
 - Guarda `resultado` (tal cual, como JSON) en la propiedad
   `auto_cotizacion_resultado` (LARGE_TEXT) del registro de esa cotización
   en el Custom Object — ajusta esto cuando conozcas el contrato real de tu

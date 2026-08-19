@@ -250,19 +250,26 @@ resto de la API sigue funcionando normal (mismo patrón que el OCR).
 | `GHL_TABLOTA_ID` | Qué base de datos usar para resolver los mensajes entrantes. Default `"default"`. |
 | `GHL_OBJETO_SCHEMA_KEY` | Opcional — key del Custom Object donde se guarda vehículo/conductor/cotización de cada contacto de auto. Default `custom_objects.chatbotprinciap` (el objeto ya existe en la cuenta). |
 | `GHL_WEBHOOK_SECRET` | Opcional pero recomendado — un secreto propio (no lo da GHL) para que nadie más pueda pegarle a `/ghl/webhook`. Se valida por `?secret=...` o header `X-GHL-Secret`. |
-| `COTIZADOR_AUTO_URL` | URL de la API de cotización del asegurador (aún no existe). Sin esto, `/cotizar/auto` deja al contacto "esperando cotización" para seguimiento manual — ver `GHL_CHATBOT_AUTO.md`. |
-| `COTIZADOR_AUTO_TOKEN` | Token/Bearer para autenticarte contra esa API, cuando exista. |
-| `COTIZADOR_AUTO_CALLBACK_URL` | Tu propia URL pública + `/cotizador-auto/webhook` — se la mandas a esa API para que te avise cuando termine de cotizar. |
-| `COTIZADOR_AUTO_WEBHOOK_SECRET` | Opcional — secreto propio para `/cotizador-auto/webhook`, mismo patrón que `GHL_WEBHOOK_SECRET`. |
+| `SEGUPOLIZA_TOKEN` | Token real de la API de cotización de Segupoliza (header `token`). Con esto configurado, `/cotizar/auto` cotiza con la API REAL — sin esto, cae al mecanismo demo de abajo. |
+| `SEGUPOLIZA_REFERER` | Header `referer` que exige Segupoliza. Default `https://pgbrokers.segupoliza.com`. |
+| `SEGUPOLIZA_CLIENT` | Header `client` que exige Segupoliza. Default `pgbrokers`. |
+| `SEGUPOLIZA_APPLICATION` | Header `application` que exige Segupoliza. Default `APIWhatsAPP`. |
+| `COTIZADOR_AUTO_URL` | Respaldo/demo — URL del mecanismo viejo de cotización (`demo_cotizador_auto.py`), solo se usa si `SEGUPOLIZA_TOKEN` NO está configurado. Ver `COTIZADOR_AUTO_CONTRATO.md`. |
+| `COTIZADOR_AUTO_TOKEN` | Token/Bearer para el mecanismo demo de arriba. |
+| `COTIZADOR_AUTO_CALLBACK_URL` | Tu propia URL pública + `/cotizador-auto/webhook` — se la manda el mecanismo demo para avisarte cuando termine de cotizar (Segupoliza real NO usa esto — su webhook de resultado va a una URL fija configurada de su lado, ver `COTIZADOR_AUTO_CONTRATO.md`). |
+| `COTIZADOR_AUTO_WEBHOOK_SECRET` | Opcional — secreto propio para `/cotizador-auto/webhook`, mismo patrón que `GHL_WEBHOOK_SECRET`. Aplica a ambos contratos (Segupoliza real y demo). |
 
-Mientras no exista la API real, hay una **API demo** (`demo_cotizador_auto.py`,
-`POST /demo/cotizador-auto`) que simula el asegurador con precios inventados
-para poder probar el flujo completo — apunta `COTIZADOR_AUTO_URL` a ella
-(mismo servicio, no requiere desplegar nada nuevo). El contrato completo
-(qué le mandamos a la API real y qué esperamos de vuelta) está en
-`COTIZADOR_AUTO_CONTRATO.md` — pásaselo a quien construya esa API. Detalles
-del flujo completo de auto (vehículo → datos del conductor → cotización →
-cita) en `GHL_CHATBOT_AUTO.md`.
+`/cotizador-auto/webhook` detecta automáticamente cuál de los dos
+contratos le está llegando (por la forma del body) — el real de Segupoliza
+(sin `contact_id`, correlacionado por teléfono) o el viejo/demo
+(`{"contact_id": ..., "resultado": {...}}`). El contrato completo de la
+integración real está en `COTIZADOR_AUTO_CONTRATO.md`. Sin `SEGUPOLIZA_TOKEN`
+configurado, hay una **API demo** (`demo_cotizador_auto.py`, `POST
+/demo/cotizador-auto`) que simula el asegurador con precios inventados para
+poder probar el flujo completo sin credenciales reales — apunta
+`COTIZADOR_AUTO_URL` a ella (mismo servicio, no requiere desplegar nada
+nuevo). Detalles del flujo completo de auto (vehículo → datos del conductor
+→ cotización → cita) en `GHL_CHATBOT_AUTO.md`.
 
 ### 3. Configurar el workflow del lado de GHL
 

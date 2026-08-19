@@ -1,136 +1,197 @@
-# Contrato: API de cotización de auto (para quien la construya)
+# Contrato: cotización de auto (Segupoliza, integración real)
 
-Este documento es el contrato que nuestro sistema (`catlogautomatcher` /
-Segutrends, en Railway) espera de tu API de cotización de auto. Hay una
-**implementación de referencia funcionando** en este mismo repo
-(`demo_cotizador_auto.py`, endpoint `POST /demo/cotizador-auto`) que cumple
-este contrato al pie de la letra — puedes correrla y probarla en vivo para
-ver exactamente el comportamiento esperado antes de construir la real.
+Este documento describe cómo `catlogautomatcher` / Segutrends (en Railway)
+se conecta con la API real de cotización de autos de **Segupoliza**. Hay una
+segunda sección más abajo ("Modo demo / contrato viejo") que documenta el
+mecanismo de prueba local que se sigue soportando en paralelo, sin
+credenciales reales, para poder probar el flujo de WhatsApp de punta a
+punta.
 
 ## Resumen del flujo
 
-1. Nosotros ya identificamos el vehículo (marca/modelo/año/versión exacta)
-   y recolectamos nombre, edad y código postal del conductor por WhatsApp.
-2. Te mandamos esos datos a **tu endpoint** (`POST` a la URL que nos des).
-3. Tú nos respondes de inmediato solo confirmando que recibiste la
-   solicitud (`200 OK`) — **no** esperamos el precio en esa misma
-   respuesta.
-4. Cuando termines de calcular (puede tardar — validación, proceso batch,
-   lo que sea de tu lado), nos llamas de vuelta a la `callback_url` que te
-   mandamos en el paso 2, con el resultado.
+1. Nosotros ya identificamos el vehículo (marca/modelo/año/versión exacta,
+   incluida la clave interna) y recolectamos nombre completo, edad, código
+   postal y correo del conductor por WhatsApp.
+2. Le mandamos esos datos a Segupoliza (`POST
+   https://webapi.segupoliza.com/api/v1/quotes/vehicle`).
+3. Segupoliza responde de inmediato solo confirmando que recibió la
+   solicitud — **no** regresa el precio en esa respuesta.
+4. Cuando termina de calcular (puede tardar unos minutos), Segupoliza nos
+   llama de vuelta a **una URL fija configurada de su lado** (por seguridad,
+   no se manda `callback_url` por request) — nuestro endpoint receptor es
+   `POST /cotizador-auto/webhook`.
+5. Ese webhook trae hasta 5 opciones de aseguradora (`primas`); se le
+   mandan las 5 completas por WhatsApp al cliente, más el link al PDF de la
+   cotización completa.
 
-Es decir: es un patrón **asíncrono con callback**, no una llamada síncrona
-pregunta-respuesta. Si tu API sí puede responder el precio al instante, es
-válido igual: solo llama al callback inmediatamente después de responder
-el paso 3.
+## 1. Nosotros llamamos a Segupoliza
 
-## 1. Nosotros te llamamos a ti
-
-`POST <tu URL>` (la que nos des, la ponemos en `COTIZADOR_AUTO_URL`)
+`POST https://webapi.segupoliza.com/api/v1/quotes/vehicle`
+(ver `segupoliza_client.py`, función `enviar_cotizacion` / `armar_payload`)
 
 Headers:
 ```
+token: <SEGUPOLIZA_TOKEN>
+application: <SEGUPOLIZA_APPLICATION>   (default "APIWhatsAPP")
+referer: <SEGUPOLIZA_REFERER>           (default "https://pgbrokers.segupoliza.com")
+client: <SEGUPOLIZA_CLIENT>             (default "pgbrokers")
 Content-Type: application/json
-Authorization: Bearer <COTIZADOR_AUTO_TOKEN>   (si nos das un token)
 ```
 
 Body:
 ```json
 {
-  "contact_id": "abc123",
-  "vehiculo": {
-    "clave": "01400102802",
-    "descripcion": "COROLLA CROSS XLE · L4 Aut 5p · Tela c/Quemac.",
-    "marca": "TOYOTA"
-  },
-  "conductor": {
-    "nombre": "Juan Pérez",
-    "edad": 30,
-    "codigo_postal": "06700"
-  },
-  "callback_url": "https://<nuestra-app>.up.railway.app/cotizador-auto/webhook"
+  "Name": "Gerardo",
+  "FatherLastName": "Espinosa",
+  "MotherLastName": "Gonzalez",
+  "Age": "61",
+  "Gender": "M",
+  "Phone": "+523330079224",
+  "Email": "gerardo@ejemplo.com",
+  "Zip": "44330",
+  "VehicleCode": "01420201624",
+  "Year": "2020"
 }
 ```
 
-Tu respuesta esperada — solo confirmar recepción, código `2xx`:
-```json
-{"ok": true, "recibido": true}
-```
+Cómo se arma cada campo (todo en `segupoliza_client.armar_payload`):
 
-(El *shape* exacto de esta respuesta no nos importa mucho — lo único que
-usamos es el código de estado HTTP para saber si tu API recibió bien la
-solicitud. Lo importante viene en el paso 2.)
+- `Name` / `FatherLastName` / `MotherLastName`: se piden como UN solo campo
+  ("¿Cuál es tu nombre completo?") y se separan nosotros con
+  `dividir_nombre()` (heurística: 1 palabra → todo a Name; 2 → Name +
+  paterno; 3 → Name + paterno + materno; 4+ → las últimas 2 son los
+  apellidos, el resto es el nombre).
+- `Gender`: NO se pregunta en la conversación — se infiere del primer
+  nombre con `inferir_genero()` (regla simple "termina en A → F", con una
+  lista corta de excepciones comunes tipo "Guadalupe" o "Andrés). Es una
+  estimación, no un dato confirmado por el cliente.
+- `Phone`: el teléfono que GHL manda en el webhook de entrada (ver
+  `TELEFONOS` en `ghl_bridge.py`) — también es la ÚNICA forma de
+  correlacionar el resultado cuando llegue (ver paso 2).
+- `Email`: se pregunta en la conversación ("¿Cuál es tu correo
+  electrónico?"), una sola vez — si el contacto ya cotizó antes y ya lo
+  tenemos guardado, no se le vuelve a pedir.
+- `Zip`, `Age`: ya se preguntaban de antes (código postal, edad).
+- `VehicleCode`: es la misma `clave` interna que ya resolvemos con el motor
+  de vehículos — confirmado que es el mismo código, sin mapeo aparte.
+- `Year`: el año del vehículo resuelto (`vehiculo["anio"]`, expuesto en
+  `ResultadoOut`/`CandidataOut` desde `discriminador.py`/`main.py`).
 
-## 2. Tú nos llamas de vuelta (callback)
+Esta llamada **no** regresa el precio — solo confirma que Segupoliza
+recibió la solicitud. Se dispara en un hilo aparte (fire-and-forget, ver
+`enviar_a_cotizar` en `ghl_bridge.py`) para no bloquear la respuesta al
+cliente por WhatsApp.
 
-`POST <callback_url>` (la misma que te mandamos en el paso 1 — no la
-cambies, viene fresca en cada solicitud por si en el futuro varía)
+## 2. Segupoliza nos llama de vuelta (webhook async)
 
-Headers esperados de tu lado:
-```
-Content-Type: application/json
-```
-Si acordamos un secreto (`COTIZADOR_AUTO_WEBHOOK_SECRET`), mándalo como
-`?secret=...` en la URL o header `X-Cotizador-Secret`.
+`POST /cotizador-auto/webhook` (nuestro endpoint, en `main.py`)
 
-Body esperado:
+Segupoliza manda este webhook a una URL fija configurada de SU lado (no
+hay campo `callback_url` en el request del paso 1, a propósito, por
+seguridad — así evitan que un cliente mande una URL arbitraria).
+
+Body real confirmado (muestra completa en `response ghl.json`, compartida
+por el cliente):
 ```json
 {
-  "contact_id": "abc123",
-  "resultado": {
-    "precio": 12345.67,
-    "moneda": "MXN",
-    "cobertura": "Amplia",
-    "vigencia_dias": 365
-  }
+  "proceso": "cotización",
+  "folio": "-1",
+  "fecha": "2026-08-13 13:29:19",
+  "prospecto": {
+    "nombre": "GERARDO",
+    "apellidos": "ESPINOSA GONZALEZ",
+    "cp": "44330",
+    "edad": "61",
+    "genero": "Maculino",
+    "whatsapp": "+523330079224",
+    "correo": ""
+  },
+  "objeto_seguro": {
+    "vehiculo": { "marca": "VOLKSWAGEN", "linea": "GOLF", "modelo": "2019", "descripcion": "..." }
+  },
+  "primas": [
+    {"opcion": "1", "aseguradora": "CHUBB", "nombre_paquete": "Amplia", "prima_total": "11128.6799"},
+    {"opcion": "2", "aseguradora": "ZURICH", "nombre_paquete": "Amplia", "prima_total": "13567.7335"},
+    {"opcion": "3", "aseguradora": "ALLIANZ", "nombre_paquete": "Amplia", "prima_total": "14996.93"},
+    {"opcion": "4", "aseguradora": "ANA", "nombre_paquete": "Amplia", "prima_total": "15164.04"},
+    {"opcion": "5", "aseguradora": "BANORTE", "nombre_paquete": "Amplia", "prima_total": "15723.85"}
+  ],
+  "documentos": { "pdf_cotizacion": "https://segubitly.com/XbOI86" }
 }
 ```
 
-- `contact_id`: **obligatorio**, tiene que ser el mismo que te mandamos en
-  el paso 1 — es como identificamos a qué conversación de WhatsApp
-  corresponde tu respuesta.
-- `resultado`: **obligatorio**, puede ser cualquier objeto JSON — hoy lo
-  guardamos tal cual (como texto JSON) en el registro de esa cotización
-  dentro de nuestro CRM, para que el asesor lo vea antes de la llamada. Si
-  quieres que separemos campos específicos (precio, cobertura, deducible,
-  etc.) en sus propios campos, dinos la forma exacta que vas a mandar y lo
-  ajustamos de nuestro lado — no es una limitación tuya, es una decisión
-  que tomamos juntos.
+**Importante — cómo lo correlacionamos:** este payload NO trae ningún
+identificador nuestro. Ni `contact_id`, ni un `folio`/`id` confiable —
+confirmado que **pueden venir `"-1"` hasta en producción**, así que no se
+pueden usar para correlacionar. La única correlación posible es el
+teléfono: `prospecto.whatsapp` contra el teléfono que nosotros mismos
+capturamos al inicio de la conversación (`TELEFONOS`, ver `ghl_bridge.py`).
 
-Nuestra respuesta a tu callback:
+Esa búsqueda (`_buscar_contact_id_por_telefono_activo`) SOLO compara contra
+conversaciones que **nosotros iniciamos y seguimos activamente** (fase
+`esperando_cotizacion`) — es un mecanismo distinto y más seguro que buscar
+un contacto desconocido en todo el directorio de GHL (ese enfoque se
+evaluó para Voice AI y se descartó explícitamente por riesgo de ligar el
+resultado al contacto equivocado; ver `GHL_VOICE_MCP.md`). Si no hay
+ninguna conversación activa con ese teléfono, no se inventa nada: se
+loggea y no se manda ningún WhatsApp.
+
+Cuando sí hay match:
+- Se guarda el payload completo (como texto JSON) en
+  `auto_cotizacion_resultado` del registro de esa cotización en el Custom
+  Object `chatbotprinciap`.
+- Se manda un WhatsApp con **las 5 opciones completas** (aseguradora +
+  paquete + precio) más el link al PDF de la cotización completa, y la
+  pregunta de agendar cita o cotizar otro vehículo (mismo flujo de
+  `cotizacion_lista` que ya existía).
+
+Nuestra respuesta a Segupoliza:
 ```json
-{"ok": true, "contact_id": "abc123"}
+{"ok": true, "contact_id": "ghl-xxxxx", "error": null}
 ```
-`ok: false` significa que no pudimos guardar el resultado de nuestro lado
-(problema nuestro, no tuyo) — si ves esto, puedes reintentar más tarde.
+`ok: false` con `contact_id: null` significa que no encontramos ninguna
+conversación activa con ese teléfono (o que el payload no traía teléfono
+utilizable) — revisa los logs (busca `[segupoliza-webhook]`).
 
-## Casos de error
+## Variables de entorno (Railway)
 
-- Si no puedes cotizar (vehículo no asegurable, zona no cubierta, lo que
-  sea), igual llama al callback, con lo que tengas en `resultado` — por
-  ejemplo `{"error": "zona no cubierta"}`. Nosotros no validamos la forma
-  de `resultado`, así que puedes usarlo para comunicar tanto un precio
-  como un rechazo.
-- Si tu solicitud inicial (paso 1) falla de nuestro lado (timeout, 5xx),
-  no tenemos retry automático todavía — es un POC. Si esto es un
-  problema, avísanos y lo agregamos.
+```
+SEGUPOLIZA_TOKEN=<token real>
+SEGUPOLIZA_REFERER=https://pgbrokers.segupoliza.com
+SEGUPOLIZA_CLIENT=pgbrokers
+SEGUPOLIZA_APPLICATION=APIWhatsAPP
+```
+(`SEGUPOLIZA_URL` es opcional, solo si el endpoint cambia.)
 
-## Prueba esto en vivo antes de construir nada
+---
 
-Corre la implementación de referencia (ya está en el repo, no requiere
-nada nuevo):
+## Modo demo / contrato viejo (sigue funcionando en paralelo)
+
+`/cotizador-auto/webhook` detecta automáticamente CUÁL de los dos
+contratos le está llegando (por la forma del body), así que este mecanismo
+de prueba local se puede seguir usando sin tocar nada, sin necesidad de
+tener `SEGUPOLIZA_TOKEN` configurado:
+
+- Si `SEGUPOLIZA_TOKEN` NO está configurado, `enviar_a_cotizar()` cae de
+  vuelta al mecanismo viejo (`COTIZADOR_AUTO_URL` + `callback_url`,
+  implementación de referencia en `demo_cotizador_auto.py`).
+- El webhook `/cotizador-auto/webhook` acepta tanto
+  `{"contact_id": ..., "resultado": {...}}` (contrato viejo/demo) como el
+  payload real de Segupoliza (detectado por la presencia de la clave
+  `"prospecto"`).
 
 ```bash
-# variables de entorno del lado de nuestra API (Railway)
+# variables de entorno del lado de nuestra API (Railway), SOLO para pruebas
 COTIZADOR_AUTO_URL=https://<nuestra-app>.up.railway.app/demo/cotizador-auto
 COTIZADOR_AUTO_CALLBACK_URL=https://<nuestra-app>.up.railway.app/cotizador-auto/webhook
 ```
 
-Con eso, todo el flujo real de WhatsApp (vehículo → nombre → edad → CP →
-"esperando cotización" → callback → tag "listo para agendar") funciona de
-punta a punta con precios inventados (`demo_cotizador_auto.py`, función
-`_precio_demo`) — así puedes ver el comportamiento exacto esperado en cada
-paso antes de escribir una sola línea de tu API real.
+Con eso, todo el flujo de WhatsApp (vehículo → nombre → edad → CP → correo
+→ "esperando cotización" → callback → tag "listo para agendar") funciona
+de punta a punta con precios inventados (`demo_cotizador_auto.py`, función
+`_precio_demo`) — útil para probar sin gastar cuota real de Segupoliza.
 
-Cuando tu API esté lista, solo cambiamos `COTIZADOR_AUTO_URL` a tu URL real
-— nada más de nuestro lado tiene que cambiar.
+Cuando `SEGUPOLIZA_TOKEN` esté configurado en el entorno, este mecanismo
+demo deja de usarse automáticamente (Segupoliza real tiene prioridad) —
+no hace falta quitar `COTIZADOR_AUTO_URL`, simplemente no se usa mientras
+haya token real.

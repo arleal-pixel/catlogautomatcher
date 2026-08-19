@@ -27,6 +27,7 @@ from typing import Dict, Optional
 import httpx
 
 import discriminador as disc
+import segupoliza_client as segupoliza
 
 GHL_API_BASE = os.environ.get("GHL_API_BASE", "https://services.leadconnectorhq.com")
 GHL_API_TOKEN = os.environ.get("GHL_API_TOKEN")  # Private Integration Token
@@ -42,8 +43,10 @@ GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
 # vehiculo_clave, vehiculo (descripcion legible, agregado despues),
 # conductor_nombre, conductor_edad, conductor_codigo_postal,
 # auto_cotizacion_resultado, canal (TEXT, agregado para distinguir
-# "whatsapp" vs "voz" -- ver mcp_server.py y GHL_VOICE_MCP.md; hay que
-# agregarlo a mano en el schema del objeto en GHL antes de usarlo).
+# "whatsapp" vs "voz" -- ver mcp_server.py y GHL_VOICE_MCP.md), y
+# conductor_correo (TEXT, agregado para la API real de Segupoliza -- ver
+# COTIZADOR_AUTO_CONTRATO.md). Ambos hay que agregarlos a mano en el schema
+# del objeto en GHL antes de usarlos.
 # "contacto" es un campo de texto normal (NO una asociacion nativa de GHL)
 # donde guardamos el contactId -- por eso las busquedas de abajo filtran
 # por ese valor.
@@ -73,6 +76,16 @@ _RESET_WORDS = {"reiniciar", "reset", "empezar", "de nuevo", "otro auto", "nuevo
 # En memoria, igual que SESIONES en main.py -- mismas limitaciones (POC,
 # un solo worker). Ver README "Limitaciones (POC)".
 CONVERSACIONES: Dict[str, dict] = {}
+
+# contact_id -> telefono (tal cual lo manda GHL en el webhook de entrada,
+# ver main.py _extraer_campo(..., "telefono", "phone", "contact_phone")).
+# Se usa para dos cosas: (1) mandarlo como "Phone" a Segupoliza al cotizar
+# (ver enviar_a_cotizar/segupoliza_client.armar_payload), y (2) correlacionar
+# el webhook ASYNC de resultado de Segupoliza (que no trae contact_id ni un
+# folio confiable, ver recibir_resultado_cotizacion_segupoliza) contra la
+# conversacion que nosotros mismos iniciamos. En memoria, misma limitacion
+# POC que CONVERSACIONES.
+TELEFONOS: Dict[str, str] = {}
 
 # contact_id -> id del registro del Custom Object creado para la
 # cotizacion EN CURSO (fase 'esperando_cotizacion') -- para que cuando
@@ -131,6 +144,41 @@ def enviar_whatsapp(contact_id: str, texto: str, conversation_id: Optional[str] 
     return r.json()
 
 
+def buscar_contact_id_por_telefono(telefono: str) -> Optional[str]:
+    """GET /contacts/search/duplicate -- resuelve un contactId de GHL a
+    partir de un numero de telefono. Pensado para el flujo de voz
+    (mcp_server.py): el panel de GHL para conectar Voice AI a un servidor
+    MCP no tiene forma de inyectar automaticamente el contactId de quien
+    llama (confirmado en vivo -- ni por parametro de la herramienta ni por
+    header HTTP, ver GHL_VOICE_MCP.md), asi que en vez de depender de eso le
+    pedimos al agente que le pregunte el telefono al cliente (dato
+    100% conversacional, igual que la edad o el codigo postal) y
+    resolvemos el contacto aqui, del lado del servidor.
+
+    Documentado por HighLevel para deteccion de duplicados (busca primero
+    por email, despues por telefono) -- lo reusamos con SOLO telefono para
+    encontrar un contacto ya existente. Si no hay match, devuelve None (la
+    cotizacion se calcula igual, solo no queda ligada a un contacto -- ver
+    segutrenda_cotizar_auto).
+
+    NOTA: este endpoint no se ha probado todavia contra una cuenta real de
+    GHL (no hay acceso directo a la cuenta desde este entorno) -- pruebalo
+    con una llamada real y avisa si el formato de telefono que uses
+    (+52..., 10 digitos, etc.) no encuentra el contacto que esperabas."""
+    with httpx.Client(timeout=15) as client:
+        r = client.get(
+            f"{GHL_API_BASE}/contacts/search/duplicate",
+            params={"locationId": GHL_LOCATION_ID, "phone": telefono},
+            headers=_headers(),
+        )
+    if r.status_code == 404:
+        return None
+    if r.status_code >= 300:
+        raise GHLError(f"GHL (buscar por telefono) respondio {r.status_code}: {r.text[:300]}")
+    contacto = r.json().get("contact") or {}
+    return contacto.get("id")
+
+
 def agregar_tag(contact_id: str, tag: str) -> None:
     """POST /contacts/{contactId}/tags -- usado para marcar el contacto como
     'listo para agendar' al terminar de recolectar los datos del conductor.
@@ -181,6 +229,7 @@ def crear_registro_cotizacion(
         "conductor_nombre": datos_conductor.get("nombre") or "",
         "conductor_edad": str(datos_conductor.get("edad") or ""),
         "conductor_codigo_postal": datos_conductor.get("codigo_postal") or "",
+        "conductor_correo": datos_conductor.get("correo") or "",
         "canal": canal,
     }
     if resultado_cotizacion is not None:
@@ -262,28 +311,54 @@ def obtener_datos_conductor(contact_id: str) -> Optional[dict]:
     except (TypeError, ValueError):
         return None
 
-    return {"nombre": str(nombre).strip(), "edad": edad, "codigo_postal": str(cp).strip()}
+    # correo es opcional -- registros de antes de que este campo existiera
+    # no lo tienen, y eso NO invalida el resto de los datos guardados (ver
+    # _avanzar_confirmar_datos_conductor, que pide el correo aparte si falta).
+    correo = propiedades.get("conductor_correo") or None
+
+    return {"nombre": str(nombre).strip(), "edad": edad, "codigo_postal": str(cp).strip(), "correo": correo}
 
 
 def enviar_a_cotizar(contact_id: str, vehiculo: dict, datos_conductor: dict) -> bool:
-    """Dispara la solicitud de cotizacion a la API del asegurador -- AUN NO
-    EXISTE, ver COTIZADOR_AUTO_URL arriba. Le mandamos una callback_url
-    para que esa API nos avise cuando tenga el resultado (puede tardar --
-    validacion humana, proceso batch del lado del asegurador, etc.).
+    """Dispara la solicitud de cotizacion. Dos caminos, en este orden:
 
-    IMPORTANTE: esto corre en un hilo aparte, sin esperar la respuesta --
+    1) SEGUPOLIZA_TOKEN configurado -> API REAL de Segupoliza (ver
+       segupoliza_client.py). Esta llamada NO regresa el precio, solo
+       confirma que la solicitud se recibio -- el precio llega DESPUES via
+       el webhook propio de Segupoliza, configurado de SU lado (no hay
+       callback_url en este request, a proposito, ver segupoliza_client.py)
+       -- ver recibir_resultado_cotizacion_segupoliza() mas abajo.
+
+    2) Si no, respaldo al mecanismo viejo/demo (COTIZADOR_AUTO_URL +
+       callback_url) -- se conserva para poder seguir probando el flujo
+       end-to-end con demo_cotizador_auto.py / probar_cotizador_demo.py sin
+       credenciales reales de Segupoliza. Este SI recibe el resultado via
+       callback a nuestra propia URL (ver recibir_resultado_cotizacion(),
+       el contrato viejo).
+
+    IMPORTANTE: ambos corren en un hilo aparte, sin esperar la respuesta --
     a proposito. Si se hiciera de forma sincrona (bloqueando este
-    request), y COTIZADOR_AUTO_URL apunta al mismo servicio (ej. la API
+    request), y la URL de destino apunta al mismo servicio (ej. la API
     demo de mas abajo, corriendo en el mismo proceso), se produce un
     self-deadlock: el unico hilo del servidor quedaria esperandose a si
     mismo. Confirmado en vivo con probar_cotizador_demo.py antes de este
     fix -- por eso el disparo es fire-and-forget via threading.Thread.
 
     Devuelve True si se pudo *disparar* la solicitud (no si ya se
-    confirmo recibida -- eso se sabe hasta que llegue el callback), False
-    solo si COTIZADOR_AUTO_URL no esta configurado todavia. El contacto
-    se queda en fase 'esperando_cotizacion' en ambos casos -- ver
-    _finalizar_datos_conductor()."""
+    confirmo recibida), False si ni Segupoliza ni el mecanismo demo estan
+    configurados. El contacto se queda en fase 'esperando_cotizacion' en
+    todos los casos -- ver _finalizar_datos_conductor()."""
+    if segupoliza.SEGUPOLIZA_TOKEN:
+        def _disparar_segupoliza():
+            try:
+                ack = segupoliza.enviar_cotizacion(vehiculo, datos_conductor)
+                print(f"[segupoliza] solicitud de cotizacion enviada para {contact_id}: {ack}")
+            except Exception as e:
+                print(f"[segupoliza] fallo el envio de la cotizacion para {contact_id}: {e}")
+
+        threading.Thread(target=_disparar_segupoliza, daemon=True).start()
+        return True
+
     if not COTIZADOR_AUTO_URL:
         return False
     payload = {
@@ -296,14 +371,14 @@ def enviar_a_cotizar(contact_id: str, vehiculo: dict, datos_conductor: dict) -> 
     if COTIZADOR_AUTO_TOKEN:
         headers["Authorization"] = f"Bearer {COTIZADOR_AUTO_TOKEN}"
 
-    def _disparar():
+    def _disparar_demo():
         try:
             with httpx.Client(timeout=15) as client:
                 client.post(COTIZADOR_AUTO_URL, json=payload, headers=headers)
         except Exception as e:
             print(f"[cotizador-auto] fallo el envio a {COTIZADOR_AUTO_URL}: {e}")
 
-    threading.Thread(target=_disparar, daemon=True).start()
+    threading.Thread(target=_disparar_demo, daemon=True).start()
     return True
 
 
@@ -376,6 +451,160 @@ def recibir_resultado_cotizacion(contact_id: str, resultado: dict) -> bool:
         print(f"[cotizador-auto-webhook] fallo mandando el resultado por WhatsApp a {contact_id}: {e}")
 
     return guardado_ok
+
+
+def _normalizar_telefono(telefono: Optional[str]) -> Optional[str]:
+    """Normaliza un numero de telefono a sus ULTIMOS 10 digitos (numero
+    local mexicano), sin importar el prefijo de pais/movil que traiga --
+    "+523330079224", "523330079224", "5213330079224" y "3330079224" todos
+    normalizan a "3330079224". Se usa SOLO para comparar/correlacionar el
+    telefono que nosotros capturamos en la conversacion contra el que manda
+    Segupoliza en su webhook (ver recibir_resultado_cotizacion_segupoliza)
+    -- NUNCA para buscar/adivinar un contacto nuevo en todo GHL (eso quedo
+    descartado, ver buscar_contact_id_por_telefono). Devuelve None si no
+    hay al menos 10 digitos."""
+    if not telefono:
+        return None
+    digitos = re.sub(r"\D", "", telefono)
+    if len(digitos) < 10:
+        return None
+    return digitos[-10:]
+
+
+def _buscar_contact_id_por_telefono_activo(telefono_normalizado: str) -> Optional[str]:
+    """Busca, SOLO entre las conversaciones que NOSOTROS iniciamos y siguen
+    en fase 'esperando_cotizacion', cual tiene un telefono (ver TELEFONOS)
+    que normaliza igual al que mando Segupoliza. A diferencia de
+    buscar_contact_id_por_telefono() -- que buscaria en TODO el directorio
+    de contactos de GHL para alguien desconocido, descartado por riesgo de
+    contacto equivocado -- esto solo compara contra conversaciones propias
+    y activas, con un numero que nosotros mismos capturamos; el riesgo de
+    ligar el resultado al contacto equivocado es mucho menor.
+
+    Si hay mas de una coincidencia (deberia ser raro -- dos personas
+    esperando cotizacion con el mismo telefono al mismo tiempo), se queda
+    con la actualizada mas recientemente."""
+    candidatos = []
+    for cid, conv in CONVERSACIONES.items():
+        if conv.get("fase") != "esperando_cotizacion":
+            continue
+        if _normalizar_telefono(TELEFONOS.get(cid)) == telefono_normalizado:
+            candidatos.append((conv.get("actualizado") or "", cid))
+    if not candidatos:
+        return None
+    candidatos.sort(reverse=True)
+    return candidatos[0][1]
+
+
+def _formatear_resultado_segupoliza(vehiculo: dict, payload: dict) -> str:
+    """Arma el mensaje de WhatsApp con las hasta 5 opciones de aseguradora
+    que manda el webhook real de Segupoliza en 'primas' (ver 'response
+    ghl.json' / COTIZADOR_AUTO_CONTRATO.md), mas la pregunta de agendar o
+    cotizar otro vehiculo. Muestra las 5 opciones completas en el mensaje
+    (decision explicita del cliente, no solo top-N + link al PDF) y ademas
+    incluye el link al PDF de la cotizacion completa si viene."""
+    vehiculo = vehiculo or {}
+    veh_seg = ((payload.get("objeto_seguro") or {}).get("vehiculo")) or {}
+    encabezado = (f"{veh_seg.get('marca') or vehiculo.get('marca') or ''} "
+                  f"{veh_seg.get('linea') or vehiculo.get('descripcion') or ''}").strip() or "tu vehículo"
+
+    primas = payload.get("primas") or []
+    lineas = [f"¡Tu cotización está lista para *{encabezado}*!", ""]
+    for p in primas:
+        try:
+            monto_txt = f"${float(p.get('prima_total')):,.2f} MXN"
+        except (TypeError, ValueError):
+            monto_txt = str(p.get("prima_total") or "")
+        aseguradora = p.get("aseguradora") or ""
+        paquete = p.get("nombre_paquete") or ""
+        opcion = p.get("opcion") or ""
+        lineas.append(f"{opcion}. *{aseguradora}* ({paquete}): {monto_txt}")
+
+    if not primas:
+        lineas.append("_(por el momento no tenemos opciones de aseguradora para mostrar -- un asesor te contacta)_")
+
+    pdf = (payload.get("documentos") or {}).get("pdf_cotizacion")
+    if pdf:
+        lineas.append("")
+        lineas.append(f"Cotización completa en PDF: {pdf}")
+
+    lineas.append("")
+    lineas.append("¿Quieres que agendemos tu cita con un asesor, o prefieres cotizar otro vehículo? "
+                   "Responde \"agendar\" u \"otro auto\".")
+    return "\n".join(lineas)
+
+
+def recibir_resultado_cotizacion_segupoliza(payload: dict) -> dict:
+    """Punto de entrada del webhook ASYNC REAL de Segupoliza (formato
+    confirmado con una muestra real de produccion -- ver 'response
+    ghl.json' y COTIZADOR_AUTO_CONTRATO.md). Lo llama POST
+    /cotizador-auto/webhook (main.py) cuando ese payload NO trae
+    'contact_id' (a diferencia del contrato viejo/demo, que si lo trae --
+    ver recibir_resultado_cotizacion() arriba, que sigue funcionando para
+    ese caso).
+
+    Este payload no trae NINGUN identificador nuestro -- ni contact_id ni
+    un folio/id confiable (pueden venir "-1" hasta en produccion, confirmado
+    por el cliente). La UNICA correlacion posible es el telefono en
+    prospecto.whatsapp contra el telefono que nosotros mismos capturamos al
+    inicio de la conversacion (ver TELEFONOS / _buscar_contact_id_por_telefono_activo).
+
+    Si no se encuentra ninguna conversacion activa con ese telefono, NO se
+    inventa nada ni se manda WhatsApp a nadie -- mismo criterio que el Plan
+    B descartado para voz (ver buscar_contact_id_por_telefono): mejor no
+    resolver que resolver mal. Se loggea y se regresa ok=False.
+
+    Devuelve {"ok": bool, "contact_id": str|None, "error": str|None}."""
+    whatsapp_in = (payload.get("prospecto") or {}).get("whatsapp")
+    telefono_norm = _normalizar_telefono(whatsapp_in)
+    if not telefono_norm:
+        print(f"[segupoliza-webhook] payload sin 'prospecto.whatsapp' utilizable: {whatsapp_in!r}")
+        return {"ok": False, "contact_id": None, "error": "sin telefono utilizable en 'prospecto.whatsapp'"}
+
+    contact_id = _buscar_contact_id_por_telefono_activo(telefono_norm)
+    if not contact_id:
+        print(f"[segupoliza-webhook] no encontre ninguna conversacion 'esperando_cotizacion' con "
+              f"telefono {whatsapp_in!r} (normalizado {telefono_norm!r})")
+        return {"ok": False, "contact_id": None,
+                "error": "no encontre una conversacion activa esperando cotizacion con ese telefono"}
+
+    conv_previa = CONVERSACIONES.get(contact_id) or {}
+    vehiculo = conv_previa.get("vehiculo") or {}
+    record_id = REGISTROS_ACTIVOS.pop(contact_id, None)
+    CONVERSACIONES.pop(contact_id, None)
+
+    try:
+        resultado_txt = json.dumps(payload, ensure_ascii=False)[:5000]
+    except (TypeError, ValueError):
+        resultado_txt = str(payload)[:5000]
+
+    guardado_ok = True
+    try:
+        if not record_id:
+            registro = buscar_registro_conductor(contact_id)
+            record_id = registro.get("id") if registro else None
+        if not record_id:
+            raise GHLError(f"no encontre ningun registro del Custom Object para {contact_id}")
+        actualizar_registro_cotizacion(record_id, {"auto_cotizacion_resultado": resultado_txt})
+    except Exception as e:
+        print(f"[segupoliza-webhook] fallo guardando resultado en GHL para {contact_id}: {e}")
+        guardado_ok = False
+
+    CONVERSACIONES[contact_id] = {
+        "fase": "cotizacion_lista",
+        "vehiculo": vehiculo,
+        "record_id": record_id,
+        "resultado": payload,
+        "actualizado": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        texto = _formatear_resultado_segupoliza(vehiculo, payload)
+        enviar_whatsapp(contact_id, texto)
+    except Exception as e:
+        print(f"[segupoliza-webhook] fallo mandando el resultado por WhatsApp a {contact_id}: {e}")
+
+    return {"ok": guardado_ok, "contact_id": contact_id, "error": None}
 
 
 def _es_reinicio(texto: str) -> bool:
@@ -454,7 +683,7 @@ def _avanzar(contact_id: str, conv: dict, resultado) -> str:
     texto_out, numeradas = _formatear_respuesta(resultado)
     if resultado.estado == "resuelto":
         vehiculo = {"clave": resultado.clave, "descripcion": resultado.descripcion,
-                    "marca": resultado.marca}
+                    "marca": resultado.marca, "anio": resultado.anio}
         texto_out += "\n\n" + _iniciar_datos_conductor(contact_id, vehiculo)
     else:
         conv["opciones_numeradas"] = numeradas
@@ -466,6 +695,7 @@ _PREGUNTAS_CONDUCTOR = {
     "nombre": "Para cotizar tu seguro de auto necesito unos datos del conductor. ¿Cuál es tu nombre completo?",
     "edad": "¿Cuál es tu edad?",
     "cp": "¿Cuál es tu código postal (5 dígitos)?",
+    "correo": "¿Cuál es tu correo electrónico?",
 }
 
 
@@ -563,10 +793,12 @@ def _iniciar_datos_conductor(contact_id: str, vehiculo: dict) -> str:
             "datos": datos_previos,
             "actualizado": datetime.now(timezone.utc).isoformat(),
         }
+        correo_previo = datos_previos.get("correo")
+        detalle_correo = f", {correo_previo}" if correo_previo else ""
         return (f"Ya tengo tus datos de antes: *{datos_previos['nombre']}*, "
-                f"{datos_previos['edad']} años, CP {datos_previos['codigo_postal']}. "
+                f"{datos_previos['edad']} años, CP {datos_previos['codigo_postal']}{detalle_correo}. "
                 "¿Sigue igual? Responde \"sí\" para continuar, o dime qué quieres "
-                "cambiar (nombre, edad o código postal).")
+                "cambiar (nombre, edad, código postal o correo).")
 
     CONVERSACIONES[contact_id] = {
         "fase": "datos_conductor",
@@ -588,6 +820,14 @@ def _avanzar_confirmar_datos_conductor(contact_id: str, conv: dict, texto: str) 
     t = disc.normalizar(texto)
 
     if t in disc._AFIRMACIONES or t in {"SI", "SIGUE IGUAL", "CONTINUAR", "CORRECTO", "OK"}:
+        if not conv["datos"].get("correo"):
+            # Cotizaciones de antes de que existiera este paso no tienen
+            # correo guardado -- se pide una sola vez antes de finalizar,
+            # sin repetir nombre/edad/CP que ya confirmo.
+            conv["fase"] = "datos_conductor"
+            conv["paso"] = "correo"
+            conv.pop("editar_uno", None)
+            return _PREGUNTAS_CONDUCTOR["correo"]
         return _finalizar_datos_conductor(contact_id, conv)
 
     if "NOMBRE" in t:
@@ -608,6 +848,12 @@ def _avanzar_confirmar_datos_conductor(contact_id: str, conv: dict, texto: str) 
         conv["editar_uno"] = True
         return _PREGUNTAS_CONDUCTOR["cp"]
 
+    if "CORREO" in t or "EMAIL" in t or "MAIL" in t:
+        conv["fase"] = "datos_conductor"
+        conv["paso"] = "correo"
+        conv["editar_uno"] = True
+        return _PREGUNTAS_CONDUCTOR["correo"]
+
     conv["fase"] = "datos_conductor"
     conv["paso"] = "nombre"
     conv["datos"] = {}
@@ -626,6 +872,14 @@ def _edad_valida(texto: str) -> Optional[int]:
 def _cp_valido(texto: str) -> Optional[str]:
     m = re.search(r"\d{5}", texto)
     return m.group(0) if m else None
+
+
+_CORREO_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _correo_valido(texto: str) -> Optional[str]:
+    m = _CORREO_RE.search((texto or "").strip())
+    return m.group(0).lower() if m else None
 
 
 def _avanzar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
@@ -662,11 +916,22 @@ def _avanzar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
         conv["actualizado"] = datetime.now(timezone.utc).isoformat()
         return _PREGUNTAS_CONDUCTOR["cp"]
 
-    # paso == "cp" -- ultimo paso siempre, con o sin editar_uno
-    cp = _cp_valido(texto)
-    if cp is None:
-        return "No reconocí un código postal de 5 dígitos. ¿Cuál es tu código postal?"
-    conv["datos"]["codigo_postal"] = cp
+    if paso == "cp":
+        cp = _cp_valido(texto)
+        if cp is None:
+            return "No reconocí un código postal de 5 dígitos. ¿Cuál es tu código postal?"
+        conv["datos"]["codigo_postal"] = cp
+        if editar_uno:
+            return _finalizar_datos_conductor(contact_id, conv)
+        conv["paso"] = "correo"
+        conv["actualizado"] = datetime.now(timezone.utc).isoformat()
+        return _PREGUNTAS_CONDUCTOR["correo"]
+
+    # paso == "correo" -- ultimo paso siempre, con o sin editar_uno
+    correo = _correo_valido(texto)
+    if correo is None:
+        return "No reconocí un correo válido, ¿me lo repites? (ej. nombre@ejemplo.com)"
+    conv["datos"]["correo"] = correo
     return _finalizar_datos_conductor(contact_id, conv)
 
 
@@ -686,6 +951,12 @@ def _finalizar_datos_conductor(contact_id: str, conv: dict) -> str:
     de nuestro lado."""
     vehiculo = conv["vehiculo"]
     datos = conv["datos"]
+    # telefono capturado del webhook de entrada (ver TELEFONOS /
+    # procesar_mensaje_whatsapp) -- no se guarda como propiedad del Custom
+    # Object (crear_registro_cotizacion no lo usa), pero si se manda a
+    # Segupoliza como "Phone" (ver segupoliza_client.armar_payload) y sirve
+    # para correlacionar su webhook de resultado despues.
+    datos["telefono"] = TELEFONOS.get(contact_id) or ""
 
     try:
         record_id = crear_registro_cotizacion(contact_id, vehiculo, datos)
@@ -714,15 +985,30 @@ def _finalizar_datos_conductor(contact_id: str, conv: dict) -> str:
             "contacta en breve para agendar tu llamada.")
 
 
-def procesar_mensaje_whatsapp(contact_id: str, texto: str, tablota_id: Optional[str] = None) -> str:
+def procesar_mensaje_whatsapp(
+    contact_id: str,
+    texto: str,
+    tablota_id: Optional[str] = None,
+    telefono: Optional[str] = None,
+) -> str:
     """Punto de entrada del puente: dado un mensaje entrante de WhatsApp ya
     resuelto por GHL a (contact_id, texto), devuelve el texto de respuesta.
+
+    `telefono`, si se manda (ver main.py /ghl/webhook -> _extraer_campo),
+    se guarda en TELEFONOS[contact_id] -- se necesita para cotizar con
+    Segupoliza (campo "Phone") y para correlacionar su webhook de
+    resultado despues (ver recibir_resultado_cotizacion_segupoliza). Se
+    actualiza en cada mensaje que lo traiga (por si cambia o llega tarde),
+    nunca se borra a mitad de conversacion.
 
     No manda el mensaje -- eso lo hace el caller (endpoint /ghl/webhook) via
     enviar_whatsapp(), para poder loggear o reintentar el envio por separado
     del procesamiento (y para poder probar con ?dry_run=true sin gastar
     cuota de WhatsApp)."""
     import main as api  # import diferido: main.py importa este modulo, evita ciclo
+
+    if telefono:
+        TELEFONOS[contact_id] = telefono
 
     tablota_id = tablota_id or GHL_TABLOTA_ID
 

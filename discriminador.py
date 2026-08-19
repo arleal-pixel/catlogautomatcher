@@ -544,6 +544,7 @@ def _candidata_desde_row(r: dict) -> dict:
         "clave": r["CLAVE"],
         "descripcion": legible,                     # se muestra la legible
         "marca": r.get("MARCA", "").strip(),
+        "anio": (r.get("AÑO") or "").strip(),        # ver COTIZADOR_AUTO_CONTRATO.md -- lo pide Segupoliza como "Year"
         "attrs": al.atributos(legible, linea),      # atributos desde la legible
     }
 

@@ -1,0 +1,19 @@
+{
+  "name": "cotizador-agent-prototipo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Prototipo aislado: agente LLM en Cloudflare que orquesta el API de Railway (resolver vehiculo + cotizar paquetes). No toca produccion/GHL.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "agents": "*",
+    "ai": "^5",
+    "workers-ai-provider": "*",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "wrangler": "*"
+  }
+}

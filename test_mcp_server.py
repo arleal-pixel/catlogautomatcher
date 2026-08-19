@@ -143,4 +143,19 @@ finally:
     srv._contact_id_header_var.reset(token)
 check(len(llamadas) == 0, f"mismo resguardo cuando el merge tag sin resolver llega por header (obtuvo {llamadas})")
 
+# --- decision de producto: NO se adivina el contacto por telefono (riesgo
+# real de ligar la cotizacion a alguien mas) -- confirma que
+# segutrenda_cotizar_auto ya no llama a buscar_contact_id_por_telefono para
+# nada, ni siquiera si hay algo parecido a un telefono a mano. Si esta
+# funcion se llega a invocar en este bloque, la prueba truena a proposito.
+ghl.buscar_contact_id_por_telefono = lambda telefono: (_ for _ in ()).throw(
+    AssertionError("segutrenda_cotizar_auto NO debe buscar contactos por telefono -- riesgo de contacto equivocado")
+)
+llamadas.clear()
+params8 = srv.CotizarAutoInput(clave="01420201624", edad_conductor=28, codigo_postal="06600")
+salida8 = run(srv.segutrenda_cotizar_auto(params8))
+d8 = json.loads(salida8)
+check("precio" in d8, "sin contact_id, la cotizacion se calcula igual (y no truena por el mock de arriba)")
+check(len(llamadas) == 0, "sin contact_id, no se guarda nada en GHL (confirma que no se intento adivinar por telefono)")
+
 print("\nTodas las pruebas de mcp_server.py pasaron.")

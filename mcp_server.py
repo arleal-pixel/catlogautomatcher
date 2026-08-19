@@ -226,12 +226,14 @@ class CotizarAutoInput(BaseModel):
     contact_id: Optional[str] = Field(
         default=None,
         description=(
-            "El contactId de GoHighLevel del cliente en esta llamada (pasalo "
-            "como parametro dinamico, ej. {{contact.id}}, en la configuracion "
-            "de esta herramienta dentro de Voice AI). Si se manda, la "
-            "cotizacion queda guardada en GHL (mismo Custom Object "
-            "'chatbotprinciap' que usa WhatsApp, con canal='voz') -- si no se "
-            "manda, la cotizacion se calcula igual pero NO se guarda en GHL."
+            "El contactId de GoHighLevel del cliente en esta llamada, SOLO si "
+            "tu configuracion de Voice AI tiene forma de mandarlo (varios "
+            "paneles de GHL, a la fecha, NO la tienen -- ver GHL_VOICE_MCP.md). "
+            "Si se manda, la cotizacion queda guardada en GHL (mismo Custom "
+            "Object 'chatbotprinciap' que usa WhatsApp, con canal='voz'). NO "
+            "se intenta adivinar ni buscar por otro medio (ej. telefono) -- "
+            "asociar la cotizacion al contacto equivocado es peor que no "
+            "guardarla."
         ),
     )
     nombre_conductor: Optional[str] = Field(
@@ -427,10 +429,13 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
     primero segutrenda_resolver_vehiculo (y segutrenda_elegir_opcion si hace
     falta) para conseguirla.
 
-    Si 'contact_id' viene en la entrada (pasalo como parametro dinamico
-    {{contact.id}} desde Voice AI), esta cotizacion tambien se guarda en GHL
-    -- mismo Custom Object 'chatbotprinciap' que usa el flujo de WhatsApp,
-    con el campo canal='voz' para distinguirlas (ver GHL_VOICE_MCP.md).
+    Esta cotizacion tambien se guarda en GHL -- mismo Custom Object
+    'chatbotprinciap' que usa el flujo de WhatsApp, con el campo canal='voz'
+    para distinguirlas -- pero SOLO si 'contact_id' viene lleno con un valor
+    real (varios paneles de Voice AI de GHL, a la fecha, no tienen forma de
+    mandarlo -- ver GHL_VOICE_MCP.md para el estado actual). A proposito NO
+    se intenta adivinar el contacto por ningun otro medio (ej. telefono) --
+    ligar la cotizacion al contacto EQUIVOCADO es peor que no guardarla.
 
     Args:
         params (CotizarAutoInput): clave del vehiculo, edad y codigo postal
@@ -483,6 +488,16 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
         contact_id = None
         origen_contact_id = None
 
+    # NOTA: se probo un tercer respaldo (buscar el contacto por telefono via
+    # GET /contacts/search/duplicate) y se descarto a proposito -- riesgo real
+    # de ligar la cotizacion al contacto EQUIVOCADO (telefono compartido,
+    # error de captura, etc.), que es peor que no guardar nada. Solo se
+    # confia en un contact_id que GHL mande explicitamente (argumento o
+    # header) -- ver ghl_bridge.buscar_contact_id_por_telefono si en algun
+    # momento se quiere retomar esa idea CON confirmacion explicita del
+    # cliente antes de usarla (ej. leerle el nombre encontrado en voz alta y
+    # que el diga "si, soy yo").
+
     if contact_id:
         try:
             ghl = _ghl()
@@ -501,12 +516,11 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
         # un error (la herramienta funciona igual para pruebas o si Voice AI
         # no esta configurado para mandarlo), pero conviene que quede en el
         # log para diagnosticar el caso "no veo la cotizacion en GHL": si
-        # nunca aparece NI esta linea NI la de arriba, contact_id
-        # simplemente no esta llegando -- ni como argumento de la
-        # herramienta ni como header HTTP (ver _ContactIdHeaderMiddleware).
+        # nunca aparece NI esta linea NI la de arriba, no llego contact_id
+        # por ningun medio confiable (argumento o header) -- ver
+        # GHL_VOICE_MCP.md para el estado actual de este problema.
         print("[segutrenda_mcp] cotizacion de voz calculada SIN contact_id -- no se guarda en GHL "
-              "(revisa que Voice AI este mandando contact_id, ya sea como argumento de la "
-              "herramienta o como header HTTP, ej. {{contact.id}}).")
+              "(ver GHL_VOICE_MCP.md, seccion 'Guardar las cotizaciones de voz en GHL').")
 
     return json.dumps(resultado, ensure_ascii=False)
 

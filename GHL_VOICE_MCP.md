@@ -35,40 +35,48 @@ el canal), hace falta:
 1. **Agregar el campo `canal`** al objeto `chatbotprinciap` en GHL
    (Configuración del objeto → agregar campo → tipo `Text`) -- igual que
    agregaste el campo `vehiculo` antes. Sin este campo, el guardado puede
-   fallar o ese dato se pierde (no rompe la llamada, ver punto 3).
-2. **Pasar `contact_id`.** Hay DOS formas -- usa la que te deje tu panel de
-   Voice AI:
-   - **Como parámetro de la herramienta** (la forma "correcta"): en la
-     configuración de `segutrenda_cotizar_auto` dentro de "MCP Tools" (la
-     lista de parámetros que aparece tras conectar el servidor y darle
-     "Refresh Tools"), busca `contact_id` y mapéalo a `{{contact.id}}`.
-   - **Como header HTTP** (respaldo, si tu panel no deja mapear valores por
-     parámetro de la herramienta -- solo te deja una lista de "Headers"
-     genérica, igual que donde va `Authorization`): agrega ahí un header
-     `contact_id` con valor `{{contact.id}}`. El servidor lo detecta solo y
-     lo usa si el argumento de la herramienta viene vacío -- si por
-     cualquier motivo llegan los dos, gana el argumento de la herramienta,
-     no el header.
+   fallar o ese dato se pierde (no rompe la llamada).
+2. **Identificar al contacto.** Se probaron 2 formas contra una cuenta real
+   de GHL y ninguna funcionó todavía -- este es el punto que sigue abierto:
 
-   **⚠️ Caso real confirmado:** en al menos una cuenta, poner
-   `{{contact.id}}` en la sección "Headers" NO se resolvió -- GHL mandó el
-   texto literal `"{{contact.id}}"` sin sustituir nada, y por lo tanto NO
-   sirve como identificador real. El servidor detecta esto (busca `{{` y
-   `}}` en el valor recibido) y **no lo guarda** en GHL -- verás en el log
-   `ADVERTENCIA: contact_id llego como texto literal sin resolver`. Si ves
-   ese mensaje, la sección "Headers" de tu panel NO resuelve variables
-   dinámicas por llamada (probablemente solo es para valores fijos, como el
-   `Authorization` de arriba) -- tienes que conseguir el `contact_id` desde
-   la sección de parámetros de la herramienta (`MCP Tools`, más abajo en el
-   mismo panel) en vez de Headers. Si no encuentras esa opción ahí tampoco,
-   mándame captura de esa sección y lo revisamos.
+   - ❌ **`contact_id` como parámetro de la herramienta** (la forma
+     "correcta" en teoría): en al menos una cuenta real, el panel de
+     "MCP Tools" de Voice AI solo deja activar/desactivar qué herramientas
+     puede usar el agente (checkboxes) -- no tiene ningún campo editable
+     por parámetro, solo muestra la descripción de la herramienta en modo
+     lectura. No hay dónde mapear `contact_id` ahí.
+   - ❌ **`contact_id` como header HTTP** (en la sección "Headers", junto a
+     `Authorization`): el servidor SÍ sabe leer esto (ver
+     `_ContactIdHeaderMiddleware` en `mcp_server.py`), pero en la práctica
+     GHL mandó el texto literal `"{{contact.id}}"` sin sustituir nada --
+     ese campo parece ser solo para valores FIJOS (como el token de
+     `Authorization`), no se re-evalúa por cada llamada. El servidor
+     detecta esto (busca `{{`/`}}` en el valor) y no lo guarda -- verás
+     `ADVERTENCIA: contact_id llego como texto literal sin resolver` en el
+     log.
+
+   **Descartado a propósito:** se evaluó resolver el contacto buscándolo por
+   teléfono (`ghl_bridge.buscar_contact_id_por_telefono`, vía
+   `GET /contacts/search/duplicate`) pero se decidió NO usarlo de forma
+   automática -- el riesgo de ligar la cotización a un contacto EQUIVOCADO
+   (teléfono compartido, error de captura, etc.) es peor que no guardar
+   nada. `segutrenda_cotizar_auto` ya no llama a esa función; la dejamos en
+   `ghl_bridge.py` solo por si en el futuro se quiere retomar la idea CON
+   una confirmación explícita del cliente (ej. leerle en voz alta el nombre
+   que se encontró y que él confirme "sí, soy yo" antes de guardar).
+
+   Mientras no exista una forma confiable de identificar al contacto desde
+   Voice AI, las cotizaciones de voz simplemente NO se guardan en GHL (se
+   siguen calculando y respondiendo bien al cliente) -- si se te ocurre otra
+   forma de conseguir el `contact_id` desde tu panel, avísame y lo probamos.
 3. Con eso, cada cotización de voz se guarda como un registro nuevo en
    `chatbotprinciap` con `canal="voz"` (los de WhatsApp siguen guardándose
    con `canal="whatsapp"`, sin que tengas que tocar nada de ese flujo) --
    mismo historial por contacto, un solo objeto, filtrable por canal. Si el
    guardado falla por cualquier motivo (credenciales, red, el campo `canal`
-   todavía no existe), el cliente de todas formas recibe su cotización --
-   el error solo queda en el log del servidor.
+   todavía no existe, no se encontró el contacto), el cliente de todas
+   formas recibe su cotización -- el error solo queda en el log del
+   servidor.
 
 ## Probarlo localmente (antes de desplegar)
 
@@ -142,9 +150,11 @@ tendrias que subir `data/tablotas/default.csv` a ese servicio tambien.
    `segutrenda_elegir_opcion` si hace falta, y termina llamando a
    `segutrenda_cotizar_auto`.
 5. Para que esa última llamada quede guardada en GHL, revisa la sección
-   "Guardar las cotizaciones de voz en GHL" arriba -- necesitas mandarle
-   `contact_id` como parámetro dinámico y haber agregado el campo `canal`
-   al objeto `chatbotprinciap`.
+   "Guardar las cotizaciones de voz en GHL" arriba -- a la fecha, sigue sin
+   haber una forma confiable de identificar al contacto desde este panel,
+   así que las cotizaciones de voz se calculan bien pero no quedan
+   guardadas en GHL todavía (avísame si encuentras otra forma de pasar
+   `contact_id` en tu panel).
 
 ## Notas honestas
 
