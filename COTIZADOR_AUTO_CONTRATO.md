@@ -195,3 +195,59 @@ Cuando `SEGUPOLIZA_TOKEN` esté configurado en el entorno, este mecanismo
 demo deja de usarse automáticamente (Segupoliza real tiene prioridad) —
 no hace falta quitar `COTIZADOR_AUTO_URL`, simplemente no se usa mientras
 haya token real.
+
+---
+
+## Modo "Segupoliza → GHL directo" (en prueba)
+
+**Decisión del cliente:** para la prueba en curso, el webhook de resultado
+de Segupoliza (paso 2 de arriba) se configura para pegarle **directo a una
+URL de GoHighLevel**, no a nuestro `/cotizador-auto/webhook`. Eso significa
+que todo lo descrito en la sección 2 (correlación por teléfono, guardado en
+`chatbotprinciap`, mensaje con las 5 aseguradoras) **no se ejecuta** en este
+modo — nuestro backend nunca ve ese payload. Es GHL (o el workflow que se
+configure ahí) quien recibe el resultado real y quien administra el
+pipeline de Opportunities **"cotizaciones autos"** que ya existe en la
+cuenta (crear/mover Opportunities, etc.).
+
+Nuestro código no queda ciego a esto, pero SOLO LEE, nunca escribe: el bot
+de WhatsApp puede consultar en vivo el pipeline "cotizaciones autos" vía la
+API de Opportunities de GHL (`GET /opportunities/search`) para saber si un
+contacto tiene cotizaciones abiertas, sin duplicar ningún estado de
+nuestro lado. Ver `listar_cotizaciones_abiertas()` en `ghl_bridge.py`.
+
+Esto habilita un comando nuevo, reconocido en cualquier punto de la
+conversación (igual que "reiniciar"): si el cliente escribe algo como
+*"cotizaciones abiertas"*, *"mis cotizaciones"*, *"cómo va mi cotización"*
+o *"cotizaciones en proceso"*, el bot consulta GHL en vivo y le contesta
+con la lista (o le dice que no tiene ninguna abierta), y de una vez le
+recuerda que puede cotizar otro vehículo.
+
+Variable de entorno necesaria:
+```
+GHL_PIPELINE_COTIZACIONES_AUTOS_ID=<el id del pipeline "cotizaciones autos">
+```
+Sácalo de `GET /opportunities/pipelines` en tu cuenta de GHL. Sin esta
+variable configurada, el comando sigue funcionando pero siempre responde
+"no tienes ninguna cotización abierta" (no truena, solo no tiene de dónde
+leer).
+
+**Filtro doble, a propósito (protección contra contacto equivocado):** como
+los nombres exactos de los query params de `GET /opportunities/search`
+(`contact_id` vs `contactId`) no están confirmados contra la cuenta real,
+`listar_cotizaciones_abiertas()` NO confía únicamente en que GHL filtre
+bien de su lado — vuelve a filtrar la respuesta comparando el contactId de
+cada Opportunity contra el contacto que preguntó, y descarta cualquier
+Opportunity donde no pueda determinar el contactId con certeza. Sin este
+segundo filtro, si el query param no aplicara (nombre equivocado, o GHL lo
+ignora), se le podrían mostrar a un cliente las cotizaciones abiertas de
+OTRO cliente — mismo riesgo de contacto equivocado que ya se descartó para
+el flujo de voz (ver `buscar_contact_id_por_telefono`).
+
+**Pendiente de confirmar en vivo** (mismo criterio que el resto del
+proyecto — no se le puso mucha fe a algo sin probarlo contra la cuenta
+real): la forma exacta de cada Opportunity en la respuesta (`name`,
+`monetaryValue`, y sobre todo cuál de `contactId`/`contact_id`/`contact.id`
+usa tu cuenta) — si el comando siempre regresa "no tienes ninguna
+cotización abierta" aunque sepas que sí hay una, es lo primero que hay que
+revisar (`_contact_id_de_opportunity` en `ghl_bridge.py`).

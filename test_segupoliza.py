@@ -184,4 +184,113 @@ salida3 = gb.recibir_resultado_cotizacion_segupoliza({"prospecto": {"whatsapp": 
 check(salida3["ok"] is False and "telefono" in salida3["error"],
       f"payload sin telefono utilizable -> ok=False con error claro (obtuvo {salida3})")
 
+# --------------------------------------------------------------------------
+# 'cotizaciones abiertas' -- lectura del pipeline de Opportunities de GHL
+# (Segupoliza ahora le manda el resultado real directo a GHL, sin pasar por
+# nuestro webhook -- decision del cliente. Nosotros NO creamos ni movemos
+# nada en ese pipeline, solo lo consultamos.)
+# --------------------------------------------------------------------------
+
+# --- _es_listar_cotizaciones: reconoce el comando en varias formas ---
+check(gb._es_listar_cotizaciones("cotizaciones abiertas") is True, "'cotizaciones abiertas' se reconoce")
+check(gb._es_listar_cotizaciones("mis cotizaciones") is True, "'mis cotizaciones' se reconoce")
+check(gb._es_listar_cotizaciones("como va mi cotizacion") is True, "'como va mi cotizacion' se reconoce")
+check(gb._es_listar_cotizaciones("cotizaciones en proceso") is True, "'cotizaciones en proceso' se reconoce")
+check(gb._es_listar_cotizaciones("jetta 2020") is False, "una descripcion de vehiculo NO se confunde con el comando")
+check(gb._es_listar_cotizaciones("hola") is False, "un saludo NO se confunde con el comando")
+
+# --- listar_cotizaciones_abiertas: sin GHL_PIPELINE_COTIZACIONES_AUTOS_ID -> [] sin tronar ---
+gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
+check(gb.listar_cotizaciones_abiertas("c1") == [],
+      "sin GHL_PIPELINE_COTIZACIONES_AUTOS_ID configurado, devuelve [] de una vez (no truena)")
+
+# --- _contact_id_de_opportunity: reconoce las 3 formas posibles ---
+check(gb._contact_id_de_opportunity({"contactId": "c1"}) == "c1", "'contactId' (camelCase) se reconoce")
+check(gb._contact_id_de_opportunity({"contact_id": "c1"}) == "c1", "'contact_id' (snake_case) se reconoce")
+check(gb._contact_id_de_opportunity({"contact": {"id": "c1"}}) == "c1", "'contact.id' anidado se reconoce")
+check(gb._contact_id_de_opportunity({"name": "sin contacto"}) is None,
+      "sin ningun campo de contacto reconocible -> None (no se asume nada)")
+check(gb._contact_id_de_opportunity({}) is None, "dict vacio no truena")
+check(gb._contact_id_de_opportunity(None) is None, "None no truena")
+
+# --- listar_cotizaciones_abiertas: filtro DOBLE -- aunque el query param de
+# GHL no filtre bien (o venga mal escrito), NUNCA se le muestran a un
+# contacto las Opportunities de OTRO contacto. Se mockea httpx directo para
+# simular una respuesta de GHL que trae Opportunities de varios contactos
+# mezcladas (como si el filtro de query param no hubiera aplicado).
+class _RespuestaFalsa:
+    status_code = 200
+    def json(self):
+        return {"opportunities": [
+            {"name": "TOYOTA COROLLA (de c1)", "contactId": "c1"},
+            {"name": "VOLKSWAGEN JETTA (de c2, NO deberia salir)", "contactId": "c2"},
+            {"name": "MAZDA 3 (sin contactId detectable, NO deberia salir)"},
+        ]}
+
+class _ClienteFalso:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def get(self, *a, **k): return _RespuestaFalsa()
+
+gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
+gb.GHL_API_TOKEN = "fake-token"
+_httpx_original = gb.httpx.Client
+gb.httpx.Client = _ClienteFalso
+try:
+    resultado_filtro = gb.listar_cotizaciones_abiertas("c1")
+finally:
+    gb.httpx.Client = _httpx_original
+    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
+
+check(len(resultado_filtro) == 1 and resultado_filtro[0]["name"] == "TOYOTA COROLLA (de c1)",
+      f"aunque GHL regrese Opportunities de otros contactos mezcladas, SOLO se quedan las de c1 "
+      f"(obtuvo {resultado_filtro})")
+
+# --- _formatear_cotizaciones_abiertas ---
+texto_vacio = gb._formatear_cotizaciones_abiertas([])
+check("no tienes ninguna cotización abierta" in texto_vacio.lower(),
+      f"lista vacia -> mensaje claro de que no hay cotizaciones abiertas (obtuvo {texto_vacio!r})")
+
+texto_lista = gb._formatear_cotizaciones_abiertas([
+    {"name": "TOYOTA COROLLA XLE 2024", "monetaryValue": 12345.67},
+    {"name": "VOLKSWAGEN JETTA 2020"},  # sin monetaryValue -- no debe tronar
+])
+check("TOYOTA COROLLA XLE 2024" in texto_lista and "$12,345.67" in texto_lista,
+      f"la opportunity con monetaryValue se muestra con precio formateado (obtuvo:\n{texto_lista})")
+check("VOLKSWAGEN JETTA 2020" in texto_lista,
+      f"la opportunity SIN monetaryValue igual se lista, sin tronar (obtuvo:\n{texto_lista})")
+
+# --- integrado en procesar_mensaje_whatsapp: comando global, en cualquier fase ---
+gb.CONVERSACIONES.clear()
+gb.listar_cotizaciones_abiertas = lambda contact_id: (
+    [{"name": "TOYOTA COROLLA XLE 2024", "monetaryValue": 12345.67}] if contact_id == "ghl-con-cotizacion" else []
+)
+
+respuesta_con = gb.procesar_mensaje_whatsapp("ghl-con-cotizacion", "cotizaciones abiertas")
+check("TOYOTA COROLLA XLE 2024" in respuesta_con,
+      f"'cotizaciones abiertas' consulta GHL en vivo y muestra la opportunity abierta (obtuvo {respuesta_con!r})")
+
+respuesta_sin = gb.procesar_mensaje_whatsapp("ghl-sin-cotizacion", "mis cotizaciones")
+check("no tienes ninguna cotización abierta" in respuesta_sin.lower(),
+      f"sin opportunities abiertas, dice claro que no hay ninguna (obtuvo {respuesta_sin!r})")
+
+# funciona incluso con una sesion de vehiculo activa a medio camino -- es un
+# comando global, no depende de la fase (mismo patron que 'reiniciar')
+gb.CONVERSACIONES["ghl-a-medias"] = {"fase": "datos_conductor", "paso": "edad",
+                                      "vehiculo": {}, "datos": {"nombre": "Juan"}, "actualizado": "z"}
+respuesta_media = gb.procesar_mensaje_whatsapp("ghl-a-medias", "ver mis cotizaciones")
+check("no tienes ninguna cotización abierta" in respuesta_media.lower()
+      and gb.CONVERSACIONES["ghl-a-medias"]["fase"] == "datos_conductor",
+      f"el comando funciona a medio camino de otra fase, SIN perder esa fase (obtuvo {respuesta_media!r}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-a-medias')})")
+
+# error consultando GHL no tumba la conversacion
+def _falla(contact_id):
+    raise gb.GHLError("simulado: GHL no respondio")
+gb.listar_cotizaciones_abiertas = _falla
+respuesta_error = gb.procesar_mensaje_whatsapp("ghl-error", "cotizaciones abiertas")
+check("no pude consultar el estado" in respuesta_error.lower(),
+      f"si falla la consulta a GHL, responde con un mensaje claro en vez de tronar (obtuvo {respuesta_error!r})")
+
 print("\n=== TODO OK (segupoliza) ===")

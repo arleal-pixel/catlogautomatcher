@@ -22,7 +22,7 @@ import os
 import re
 import threading
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import httpx
 
@@ -51,6 +51,17 @@ GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
 # donde guardamos el contactId -- por eso las busquedas de abajo filtran
 # por ese valor.
 GHL_OBJETO_SCHEMA_KEY = os.environ.get("GHL_OBJETO_SCHEMA_KEY", "custom_objects.chatbotprinciap")
+
+# Pipeline de Opportunities "cotizaciones autos" que YA EXISTE en la cuenta
+# de GHL -- se usa SOLO DE LECTURA (ver listar_cotizaciones_abiertas() mas
+# abajo). Decision explicita del cliente: cuando el resultado real de
+# Segupoliza se manda directo a GHL (sin pasar por nuestro
+# /cotizador-auto/webhook), es GHL/su workflow quien crea y mueve las
+# Opportunities de ese pipeline -- nosotros NO creamos ni movemos nada ahi,
+# solo consultamos el estado actual para poder responder bien por WhatsApp
+# ("tienes una cotizacion en proceso", "cotiza otro auto", "ver mis
+# cotizaciones abiertas") sin duplicar ese estado de nuestro lado.
+GHL_PIPELINE_COTIZACIONES_AUTOS_ID = os.environ.get("GHL_PIPELINE_COTIZACIONES_AUTOS_ID")
 
 # La API de Custom Objects usa un header Version distinto al resto de la
 # API de GHL (que usa la fecha en GHL_API_VERSION, ej. "2021-07-28") --
@@ -191,6 +202,104 @@ def agregar_tag(contact_id: str, tag: str) -> None:
                          json={"tags": [tag]}, headers=_headers())
     if r.status_code >= 300:
         raise GHLError(f"GHL (add tag) respondio {r.status_code}: {r.text[:300]}")
+
+
+def _contact_id_de_opportunity(op: dict) -> Optional[str]:
+    """Extrae el contactId de una Opportunity devuelta por GHL, sin asumir
+    una sola forma -- distintas versiones/endpoints de su API lo regresan
+    como `contactId`, `contact_id`, o anidado en `contact.id`. Devuelve
+    None si no se encuentra en NINGUNA de esas formas (ver
+    listar_cotizaciones_abiertas: una Opportunity sin contactId detectable
+    se descarta, nunca se asume que "es del contacto correcto")."""
+    if not isinstance(op, dict):
+        return None
+    directo = op.get("contactId") or op.get("contact_id")
+    if directo:
+        return str(directo)
+    contacto = op.get("contact")
+    if isinstance(contacto, dict) and contacto.get("id"):
+        return str(contacto["id"])
+    return None
+
+
+def listar_cotizaciones_abiertas(contact_id: str) -> List[dict]:
+    """GET /opportunities/search -- lista las Opportunities ABIERTAS
+    (status "open", ni ganadas ni perdidas) del pipeline "cotizaciones
+    autos" PARA ESTE CONTACTO. SOLO LECTURA a propósito -- ver
+    GHL_PIPELINE_COTIZACIONES_AUTOS_ID arriba: no creamos ni movemos nada
+    de este lado, GHL/su workflow es quien administra ese pipeline cuando
+    Segupoliza le manda el resultado real directo a GHL.
+
+    IMPORTANTE -- filtro doble, a propósito: se manda `contact_id` como
+    query param (para que GHL haga el filtro de su lado, más barato), PERO
+    ADEMÁS se vuelve a filtrar la respuesta aquí, comparando
+    `_contact_id_de_opportunity(op) == contact_id` uno por uno. No es
+    redundancia -- es el resguardo real: los nombres exactos de los query
+    params de esta API (`contact_id` vs `contactId`, etc.) NO se han
+    confirmado todavía contra la cuenta real, así que si el filtro del
+    query param no aplica (nombre equivocado, o GHL simplemente lo
+    ignora), SIN este segundo filtro se le mostrarían a un cliente las
+    cotizaciones abiertas de OTRO cliente -- mismo tipo de riesgo de
+    contacto equivocado que ya se descartó para el flujo de voz (ver
+    buscar_contact_id_por_telefono). Cualquier Opportunity donde no se
+    pueda determinar el contactId con certeza se descarta también (mejor
+    no mostrarla que mostrarla mal).
+
+    Sin GHL_PIPELINE_COTIZACIONES_AUTOS_ID configurado, devuelve [] de una
+    vez (no truena) -- el bot simplemente no ofrece esta opción todavía.
+
+    NOTA: los nombres exactos de los query params (`contact_id` vs
+    `contactId`) y la forma exacta de cada Opportunity en la respuesta
+    siguen sin confirmarse en vivo -- si esto siempre devuelve vacío
+    aunque sepas que hay Opportunities abiertas para ese contacto, revisa
+    primero `_contact_id_de_opportunity` (puede que el campo real tenga
+    otro nombre que todavía no cubrimos)."""
+    if not GHL_PIPELINE_COTIZACIONES_AUTOS_ID:
+        return []
+    with httpx.Client(timeout=15) as client:
+        r = client.get(
+            f"{GHL_API_BASE}/opportunities/search",
+            params={
+                "location_id": GHL_LOCATION_ID,
+                "pipeline_id": GHL_PIPELINE_COTIZACIONES_AUTOS_ID,
+                "contact_id": contact_id,
+                "status": "open",
+            },
+            headers=_headers(),
+        )
+    if r.status_code >= 300:
+        raise GHLError(f"GHL (listar cotizaciones abiertas) respondio {r.status_code}: {r.text[:300]}")
+    oportunidades = r.json().get("opportunities") or []
+    return [op for op in oportunidades if _contact_id_de_opportunity(op) == contact_id]
+
+
+def _formatear_cotizaciones_abiertas(oportunidades: List[dict]) -> str:
+    """Arma el mensaje de WhatsApp con la lista de Opportunities abiertas
+    (ver listar_cotizaciones_abiertas). No asume campos que no confirmamos
+    todavía contra la API real -- usa 'name' y, si viene, 'monetaryValue'."""
+    if not oportunidades:
+        return ("No tienes ninguna cotización abierta en este momento. "
+                "¿Quieres cotizar un vehículo? Dime marca, modelo y año.")
+    lineas = ["Estas son tus cotizaciones abiertas:"]
+    for i, op in enumerate(oportunidades, 1):
+        nombre = op.get("name") or "Cotización"
+        valor = op.get("monetaryValue")
+        detalle = f" -- ${valor:,.2f}" if isinstance(valor, (int, float)) and valor else ""
+        lineas.append(f"{i}. {nombre}{detalle}")
+    lineas.append("")
+    lineas.append("¿Quieres cotizar otro vehículo? Solo dime marca, modelo y año.")
+    return "\n".join(lineas)
+
+
+def _es_listar_cotizaciones(texto: str) -> bool:
+    """Detecta si el cliente esta preguntando por sus cotizaciones abiertas
+    (comando reconocido en CUALQUIER fase de la conversacion, igual que
+    _es_reinicio -- no depende de en que paso este)."""
+    t = disc.normalizar(texto or "")
+    if "COTIZACION" not in t:
+        return False
+    return any(p in t for p in ("ABIERT", "PROCESO", "PENDIENT", "ESTADO", "MI COTIZACION",
+                                 "MIS COTIZACION", "VER COTIZACION", "COMO VA", "COMO VAN"))
 
 
 def crear_registro_cotizacion(
@@ -980,9 +1089,11 @@ def _finalizar_datos_conductor(contact_id: str, conv: dict) -> str:
 
     if enviado:
         return ("¡Listo! Ya tengo todos tus datos. Estamos calculando tu cotización con la "
-                "aseguradora -- en cuanto esté lista te contacto para agendar tu llamada.")
+                "aseguradora -- en cuanto esté lista te contacto para agendar tu llamada. Si quieres "
+                "consultar el estado, escribe \"cotizaciones abiertas\".")
     return ("¡Listo! Ya tengo todos tus datos. Un asesor va a revisar tu cotización y te "
-            "contacta en breve para agendar tu llamada.")
+            "contacta en breve para agendar tu llamada. Si quieres consultar el estado, escribe "
+            "\"cotizaciones abiertas\".")
 
 
 def procesar_mensaje_whatsapp(
@@ -1016,6 +1127,21 @@ def procesar_mensaje_whatsapp(
         CONVERSACIONES.pop(contact_id, None)
         return "Listo, empezamos de nuevo. Dime marca, modelo y año del auto."
 
+    # comando global reconocido en CUALQUIER fase (igual que _es_reinicio) --
+    # consulta el pipeline "cotizaciones autos" de GHL EN VIVO (solo
+    # lectura, ver listar_cotizaciones_abiertas) en vez de depender de nada
+    # que nosotros hayamos guardado localmente, porque el resultado real de
+    # Segupoliza ahora se manda directo a GHL, sin pasar por nuestro
+    # webhook -- ver COTIZADOR_AUTO_CONTRATO.md.
+    if _es_listar_cotizaciones(texto):
+        try:
+            oportunidades = listar_cotizaciones_abiertas(contact_id)
+        except Exception as e:
+            print(f"[listar-cotizaciones] fallo consultando GHL para {contact_id}: {e}")
+            return ("Por el momento no pude consultar el estado de tus cotizaciones -- intenta de "
+                     "nuevo en un momento, o dime marca, modelo y año si quieres cotizar un vehículo.")
+        return _formatear_cotizaciones_abiertas(oportunidades)
+
     conv = CONVERSACIONES.get(contact_id)
 
     # Vehiculo resuelto y ya teniamos datos del conductor de antes ->
@@ -1032,7 +1158,7 @@ def procesar_mensaje_whatsapp(
     if conv and conv.get("fase") == "esperando_cotizacion":
         return ("Todavía estamos calculando tu cotización con la aseguradora -- en cuanto esté "
                 "lista te contacto. Si quieres cotizar otro vehículo mientras tanto, escribe "
-                "\"reiniciar\".")
+                "\"reiniciar\", o \"cotizaciones abiertas\" para ver el estado.")
 
     # Cotizacion lista, esperando que el cliente diga si quiere agendar o
     # cotizar otro vehiculo (ver recibir_resultado_cotizacion).

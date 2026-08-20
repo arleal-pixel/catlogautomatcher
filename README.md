@@ -258,6 +258,7 @@ resto de la API sigue funcionando normal (mismo patrón que el OCR).
 | `COTIZADOR_AUTO_TOKEN` | Token/Bearer para el mecanismo demo de arriba. |
 | `COTIZADOR_AUTO_CALLBACK_URL` | Tu propia URL pública + `/cotizador-auto/webhook` — se la manda el mecanismo demo para avisarte cuando termine de cotizar (Segupoliza real NO usa esto — su webhook de resultado va a una URL fija configurada de su lado, ver `COTIZADOR_AUTO_CONTRATO.md`). |
 | `COTIZADOR_AUTO_WEBHOOK_SECRET` | Opcional — secreto propio para `/cotizador-auto/webhook`, mismo patrón que `GHL_WEBHOOK_SECRET`. Aplica a ambos contratos (Segupoliza real y demo). |
+| `GHL_PIPELINE_COTIZACIONES_AUTOS_ID` | Opcional — id del pipeline "cotizaciones autos" en Opportunities de GHL. Habilita el comando "cotizaciones abiertas" por WhatsApp (SOLO LECTURA — ver "Modo Segupoliza → GHL directo" en `COTIZADOR_AUTO_CONTRATO.md`). Sin esto, el comando responde siempre "no tienes ninguna cotización abierta". |
 
 `/cotizador-auto/webhook` detecta automáticamente cuál de los dos
 contratos le está llegando (por la forma del body) — el real de Segupoliza
