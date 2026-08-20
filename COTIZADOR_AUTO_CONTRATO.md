@@ -60,7 +60,10 @@ Cómo se arma cada campo (todo en `segupoliza_client.armar_payload`):
   ("¿Cuál es tu nombre completo?") y se separan nosotros con
   `dividir_nombre()` (heurística: 1 palabra → todo a Name; 2 → Name +
   paterno; 3 → Name + paterno + materno; 4+ → las últimas 2 son los
-  apellidos, el resto es el nombre).
+  apellidos, el resto es el nombre). Si `FatherLastName` o `MotherLastName`
+  quedan vacíos (nombre de una o dos palabras), se manda `"."` en vez de
+  cadena vacía — confirmado en vivo que Segupoliza los pide como
+  obligatorios y una cadena vacía da problemas.
 - `Gender`: se intenta inferir del primer nombre con la librería
   [`gender-guesser`](https://pypi.org/project/gender-guesser/) (base de
   datos de nombres, no una regla simple) — ver
@@ -85,7 +88,11 @@ Cómo se arma cada campo (todo en `segupoliza_client.armar_payload`):
   ambiguo.
 - `Phone`: el teléfono que GHL manda en el webhook de entrada (ver
   `TELEFONOS` en `ghl_bridge.py`) — también es la ÚNICA forma de
-  correlacionar el resultado cuando llegue (ver paso 2).
+  correlacionar el resultado cuando llegue (ver paso 2). Se limpia con
+  `_limpiar_telefono()` antes de mandarlo (quita espacios, guiones y
+  paréntesis) — confirmado en vivo que si se manda tal cual lo formatea
+  GHL a veces (ej. `"81 1803 1414"`, con espacios), Segupoliza lo recibe
+  separado.
 - `Email`: se pregunta en la conversación una sola vez — pero antes de
   preguntarlo de cero, se revisa si ya lo tenemos guardado (de una
   cotización anterior con este bot) o si GHL ya tiene un correo nativo en

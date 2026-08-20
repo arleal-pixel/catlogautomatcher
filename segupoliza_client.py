@@ -185,6 +185,23 @@ def _headers() -> dict:
     }
 
 
+def _limpiar_telefono(telefono: Optional[str]) -> str:
+    """Limpia el telefono antes de mandarlo a Segupoliza como "Phone" --
+    quita espacios, guiones, parentesis y cualquier caracter que no sea
+    digito (conserva un '+' inicial si lo trae, para no perder el codigo
+    de pais si viene en formato E.164).
+
+    Confirmado en vivo contra la API real: si se manda tal cual como lo
+    formatea GHL a veces (ej. "81 1803 1414", con espacios), Segupoliza lo
+    recibe separado -- este limpiado lo evita."""
+    telefono = (telefono or "").strip()
+    if not telefono:
+        return ""
+    tiene_mas = telefono.startswith("+")
+    solo_digitos = re.sub(r"\D", "", telefono)
+    return f"+{solo_digitos}" if tiene_mas else solo_digitos
+
+
 def armar_payload(vehiculo: dict, datos_conductor: dict) -> dict:
     """Arma el body exacto que espera Segupoliza a partir de nuestras
     estructuras internas (vehiculo: clave/marca/descripcion/anio;
@@ -194,7 +211,14 @@ def armar_payload(vehiculo: dict, datos_conductor: dict) -> dict:
       resolvemos con el motor de vehiculos, sin mapeo aparte).
     - Year = vehiculo["anio"] (agregado a ResultadoOut/vehiculo justo para
       esto, ver main.py).
-    - Name/FatherLastName/MotherLastName = dividir_nombre(nombre).
+    - Name/FatherLastName/MotherLastName = dividir_nombre(nombre). Si algun
+      apellido queda vacio (ej. el cliente solo dio un nombre, o dos
+      palabras), se manda "." en vez de cadena vacia -- confirmado en vivo
+      que Segupoliza los pide como obligatorios y una cadena vacia da
+      problemas; "." es el relleno que se acordo usar.
+    - Phone = _limpiar_telefono() -- ver su docstring, evita mandar el
+      telefono con espacios (confirmado en vivo que asi llega "separado"
+      del lado de Segupoliza).
     - Gender: se usa datos_conductor["genero"] si ya viene -- normalmente SI
       viene, porque la conversacion ya lo resolvio (gender-guesser con
       confianza, o preguntandole al cliente cuando fue ambiguo, ver
@@ -211,11 +235,11 @@ def armar_payload(vehiculo: dict, datos_conductor: dict) -> dict:
 
     return {
         "Name": nombre,
-        "FatherLastName": apellido_paterno,
-        "MotherLastName": apellido_materno,
+        "FatherLastName": apellido_paterno or ".",
+        "MotherLastName": apellido_materno or ".",
         "Age": str(datos_conductor.get("edad") or ""),
         "Gender": genero,
-        "Phone": datos_conductor.get("telefono") or "",
+        "Phone": _limpiar_telefono(datos_conductor.get("telefono")),
         "Email": datos_conductor.get("correo") or "",
         "Zip": datos_conductor.get("codigo_postal") or "",
         "VehicleCode": vehiculo.get("clave") or "",

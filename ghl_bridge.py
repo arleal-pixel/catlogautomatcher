@@ -1202,8 +1202,8 @@ def _finalizar_datos_conductor(contact_id: str, conv: dict) -> str:
     }
 
     if enviado:
-        return ("¡Listo! Ya tengo todos tus datos. Estamos calculando tu cotización con la "
-                "aseguradora -- en cuanto esté lista te contacto para agendar tu llamada. Si quieres "
+        return ("¡Listo! Ya tengo todos tus datos. Estamos calculando tu cotización con las "
+                "aseguradoras -- en cuanto esté lista te contacto para agendar tu llamada. Si quieres "
                 "consultar el estado, escribe \"cotizaciones abiertas\".")
     return ("¡Listo! Ya tengo todos tus datos. Un asesor va a revisar tu cotización y te "
             "contacta en breve para agendar tu llamada. Si quieres consultar el estado, escribe "
@@ -1270,7 +1270,7 @@ def procesar_mensaje_whatsapp(
     # Datos completos, esperando el resultado de la API de cotizacion
     # (llega via el callback a /cotizador-auto/webhook, no por WhatsApp).
     if conv and conv.get("fase") == "esperando_cotizacion":
-        return ("Todavía estamos calculando tu cotización con la aseguradora -- en cuanto esté "
+        return ("Todavía estamos calculando tu cotización con las aseguradoras -- en cuanto esté "
                 "lista te contacto. Si quieres cotizar otro vehículo mientras tanto, escribe "
                 "\"reiniciar\", o \"cotizaciones abiertas\" para ver el estado.")
 

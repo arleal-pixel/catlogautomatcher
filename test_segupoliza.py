@@ -80,6 +80,30 @@ payload3 = seg.armar_payload(vehiculo, datos_nombre_ambiguo)
 check(payload3["Gender"] in ("M", "F"),
       f"con un nombre que gender-guesser no reconoce, igual se manda algo (fallback determinista) (obtuvo {payload3['Gender']!r})")
 
+# --- _limpiar_telefono / Phone -- confirmado en vivo que con espacios llega separado ---
+check(seg._limpiar_telefono("81 1803 1414") == "8118031414", "quita los espacios del telefono")
+check(seg._limpiar_telefono("+52 33 3007 9224") == "+523330079224", "quita espacios, conserva el '+' inicial")
+check(seg._limpiar_telefono("81-1803-1414") == "8118031414", "quita guiones")
+check(seg._limpiar_telefono("(81) 1803 1414") == "8118031414", "quita parentesis")
+check(seg._limpiar_telefono(None) == "", "None no truena, da cadena vacia")
+check(seg._limpiar_telefono("") == "", "vacio no truena")
+
+datos_telefono_con_espacios = dict(datos, telefono="81 1803 1414")
+payload_tel = seg.armar_payload(vehiculo, datos_telefono_con_espacios)
+check(payload_tel["Phone"] == "8118031414",
+      f"armar_payload manda el telefono SIN espacios (obtuvo {payload_tel['Phone']!r})")
+
+# --- apellidos vacios -> "." (Segupoliza los pide obligatorios) ---
+datos_un_nombre = dict(datos, nombre="Armando")  # 1 sola palabra -> los dos apellidos quedan vacios
+payload_un_nombre = seg.armar_payload(vehiculo, datos_un_nombre)
+check(payload_un_nombre["FatherLastName"] == "." and payload_un_nombre["MotherLastName"] == ".",
+      f"con un nombre de una sola palabra, ambos apellidos se mandan como '.' (obtuvo {payload_un_nombre})")
+
+datos_dos_palabras = dict(datos, nombre="Armando Leal")  # 2 palabras -> materno queda vacio
+payload_dos_palabras = seg.armar_payload(vehiculo, datos_dos_palabras)
+check(payload_dos_palabras["FatherLastName"] == "Leal" and payload_dos_palabras["MotherLastName"] == ".",
+      f"con dos palabras, el materno vacio se manda como '.' (obtuvo {payload_dos_palabras})")
+
 # --------------------------------------------------------------------------
 # ghl_bridge: telefono, normalizacion, correlacion y el webhook real
 # --------------------------------------------------------------------------
