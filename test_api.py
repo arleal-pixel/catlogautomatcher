@@ -514,6 +514,28 @@ check(d["ok"] and "listo, encontré tu versión" in d["respuesta"].lower()
       f"resolver el vehiculo de un jalon (sin sesion previa) SI continua pidiendo datos del "
       f"conductor (obtuvo {d.get('respuesta')})")
 
+# /ghl/webhook: el cliente responde a los botones nativos de GHL "Tu
+# cotización está lista" ("Asegurar mi auto (Emitir)" / "Hablar con asesor
+# (Dudas)", modo Segupoliza -> GHL directo) -- el bot no debe mandar nada
+# de su lado, ni tronar, ni caer en el resguardo viejo de "ya quedo tu cita
+# en proceso" (ese resguardo matchea "ASESOR" a secas, ver ghl_bridge.py).
+gb.CONVERSACIONES.clear()
+gb.CONVERSACIONES["ghl-boton-ghl"] = {"fase": "esperando_cotizacion", "datos": {}}
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-boton-ghl", "mensaje": "Asegurar mi auto (Emitir)"})
+d = r.json()
+check(d["ok"] is True and d["enviado"] is False and d["respuesta"] is None and d["error"] is None,
+      f"responder al boton 'Asegurar mi auto (Emitir)' de GHL -> ok=True, enviado=False, sin "
+      f"mandar nada por WhatsApp de nuestro lado (obtuvo {d})")
+check("ghl-boton-ghl" not in gb.CONVERSACIONES,
+      "responder al boton de GHL limpia la fase local obsoleta (esperando_cotizacion)")
+
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-boton-ghl-2", "mensaje": "Hablar con asesor (Dudas)"})
+d = r.json()
+check(d["ok"] is True and d["enviado"] is False and d["respuesta"] is None,
+      f"responder al boton 'Hablar con asesor (Dudas)' de GHL tampoco manda nada, y NO cae en "
+      f"el resguardo viejo de 'ya quedo tu cita en proceso' (obtuvo {d})")
+gb.CONVERSACIONES.clear()
+
 # opciones numeradas en 'aclaracion' -- contestar solo "2" elige la 2a opcion
 gb.CONVERSACIONES.clear()
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "corolla 2024"})

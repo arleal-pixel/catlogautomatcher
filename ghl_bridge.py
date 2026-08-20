@@ -328,6 +328,37 @@ def _es_listar_cotizaciones(texto: str) -> bool:
                                  "MIS COTIZACION", "VER COTIZACION", "COMO VA", "COMO VAN"))
 
 
+def _es_respuesta_botones_cotizacion_ghl(texto: str) -> bool:
+    """Detecta si el mensaje es la respuesta del cliente a los botones
+    interactivos que manda GHL DIRECTO por WhatsApp cuando Segupoliza le
+    entrega el resultado de una cotizacion sin pasar por nuestro webhook
+    (modo "Segupoliza -> GHL directo", ver COTIZADOR_AUTO_CONTRATO.md):
+    "Tu cotización está lista" + botones "Asegurar mi auto (Emitir)" /
+    "Hablar con asesor (Dudas)".
+
+    Ese mensaje y todo lo que pase despues (el cliente picandole a un boton,
+    o contestando con texto libre tipo "quiero asegurarlo" o "tengo una
+    duda") lo tiene que manejar POR COMPLETO el workflow de GHL que ya esta
+    corriendo esa conversacion -- si nuestro webhook tambien reacciona
+    (tratandolo como si fuera una descripcion de vehiculo nueva, o cayendo
+    en el resguardo viejo de "ASESOR" mas abajo en
+    procesar_mensaje_whatsapp, que responde "ya quedo tu cita en proceso",
+    un mensaje que no tiene nada que ver con esto), las dos conversaciones
+    se pisan y el cliente recibe respuestas duplicadas o confusas.
+
+    Por eso procesar_mensaje_whatsapp() usa esto como comando global (mismo
+    nivel que _es_reinicio/_es_listar_cotizaciones, se revisa ANTES de
+    cualquier fase) y, si matchea, no contesta nada de nuestro lado (ver
+    el "return None" mas abajo) -- se deja que GHL siga con lo suyo."""
+    t = disc.normalizar(texto or "")
+    return (
+        "EMITIR" in t
+        or "ASEGURAR MI AUTO" in t
+        or ("HABLAR" in t and "ASESOR" in t)
+        or t in {"DUDAS", "ASEGURAR", "EMITIR", "ASEGURAR MI AUTO (EMITIR)", "HABLAR CON ASESOR (DUDAS)"}
+    )
+
+
 def crear_registro_cotizacion(
     contact_id: str,
     vehiculo: dict,
@@ -1215,9 +1246,14 @@ def procesar_mensaje_whatsapp(
     texto: str,
     tablota_id: Optional[str] = None,
     telefono: Optional[str] = None,
-) -> str:
+) -> Optional[str]:
     """Punto de entrada del puente: dado un mensaje entrante de WhatsApp ya
     resuelto por GHL a (contact_id, texto), devuelve el texto de respuesta.
+
+    Puede devolver None -- significa "no contestar nada de nuestro lado a
+    este mensaje" (ver _es_respuesta_botones_cotizacion_ghl mas abajo). El
+    caller (endpoint /ghl/webhook en main.py) tiene que revisar por None
+    ANTES de intentar mandarlo por WhatsApp.
 
     `telefono`, si se manda (ver main.py /ghl/webhook -> _extraer_campo),
     se guarda en TELEFONOS[contact_id] -- se necesita para cotizar con
@@ -1240,6 +1276,19 @@ def procesar_mensaje_whatsapp(
     if _es_reinicio(texto):
         CONVERSACIONES.pop(contact_id, None)
         return "Listo, empezamos de nuevo. Dime marca, modelo y año del auto."
+
+    # comando global (igual nivel que _es_reinicio, se revisa ANTES que
+    # cualquier fase): el cliente esta respondiendo a los botones nativos
+    # de GHL de "tu cotización está lista" (modo Segupoliza -> GHL directo).
+    # Esa conversacion la maneja por completo el workflow de GHL -- no
+    # contestamos nada de nuestro lado (ver _es_respuesta_botones_cotizacion_ghl)
+    # y de paso limpiamos cualquier fase local que hayamos dejado a medias
+    # (ej. "esperando_cotizacion"), porque evidentemente el resultado ya
+    # se resolvio via GHL directo y esa fase quedo obsoleta.
+    if _es_respuesta_botones_cotizacion_ghl(texto):
+        print(f"[cotizacion-ghl-directo] ignorando respuesta a botones de GHL para {contact_id}: {texto!r}")
+        CONVERSACIONES.pop(contact_id, None)
+        return None
 
     # comando global reconocido en CUALQUIER fase (igual que _es_reinicio) --
     # consulta el pipeline "cotizaciones autos" de GHL EN VIVO (solo

@@ -1265,6 +1265,19 @@ async def ghl_webhook(request: Request, dry_run: bool = False):
 
     respuesta = ghl_bridge.procesar_mensaje_whatsapp(identificador, mensaje, telefono=telefono)
 
+    # None significa "el bot decidio a proposito no contestar este mensaje"
+    # (ver ghl_bridge._es_respuesta_botones_cotizacion_ghl) -- ej. el
+    # cliente esta respondiendo a los botones nativos de GHL "Asegurar mi
+    # auto (Emitir)" / "Hablar con asesor (Dudas)" que manda un workflow de
+    # GHL directo (modo Segupoliza -> GHL directo). Esa conversacion la
+    # maneja GHL por completo -- no se manda nada por WhatsApp de nuestro
+    # lado, ni siquiera en dry_run.
+    if respuesta is None:
+        return GHLWebhookOut(
+            ok=True, contact_id=contact_id, mensaje_recibido=mensaje, respuesta=None, enviado=False,
+            error=None,
+        )
+
     if dry_run or not contact_id:
         return GHLWebhookOut(
             ok=True, contact_id=contact_id, mensaje_recibido=mensaje, respuesta=respuesta, enviado=False,

@@ -475,4 +475,51 @@ check("ya tengo todos tus datos" in r_cambia_ok.lower()
 
 gb.obtener_datos_conductor = lambda contact_id: None  # deja el mock neutro para el resto
 
+# --------------------------------------------------------------------------
+# _es_respuesta_botones_cotizacion_ghl -- ignorar respuestas a los botones
+# nativos de GHL ("Tu cotización está lista" / "Asegurar mi auto (Emitir)" /
+# "Hablar con asesor (Dudas)") cuando Segupoliza le manda el resultado
+# directo a GHL sin pasar por nuestro webhook.
+# --------------------------------------------------------------------------
+
+# --- reconoce las variantes esperadas del boton/reply ---
+check(gb._es_respuesta_botones_cotizacion_ghl("Asegurar mi auto (Emitir)") is True,
+      "'Asegurar mi auto (Emitir)' se reconoce")
+check(gb._es_respuesta_botones_cotizacion_ghl("Hablar con asesor (Dudas)") is True,
+      "'Hablar con asesor (Dudas)' se reconoce")
+check(gb._es_respuesta_botones_cotizacion_ghl("emitir") is True, "'emitir' solo se reconoce")
+check(gb._es_respuesta_botones_cotizacion_ghl("quiero hablar con un asesor") is True,
+      "'quiero hablar con un asesor' se reconoce (HABLAR + ASESOR)")
+check(gb._es_respuesta_botones_cotizacion_ghl("dudas") is True, "'dudas' sola se reconoce")
+check(gb._es_respuesta_botones_cotizacion_ghl("quiero asegurar mi auto") is True,
+      "'quiero asegurar mi auto' se reconoce")
+
+# --- NO se confunde con mensajes normales del flujo de cotizacion ---
+check(gb._es_respuesta_botones_cotizacion_ghl("jetta 2020") is False,
+      "una descripcion de vehiculo NO se confunde con los botones")
+check(gb._es_respuesta_botones_cotizacion_ghl("hola") is False, "un saludo NO se confunde con los botones")
+check(gb._es_respuesta_botones_cotizacion_ghl("cotizaciones abiertas") is False,
+      "'cotizaciones abiertas' NO se confunde con los botones")
+check(gb._es_respuesta_botones_cotizacion_ghl("") is False, "texto vacio -> False")
+
+# --- procesar_mensaje_whatsapp: devuelve None y no truena, limpia la conversacion local ---
+gb.CONVERSACIONES.clear()
+gb.CONVERSACIONES["ghl-boton-emitir"] = {"fase": "esperando_cotizacion", "datos": {}}
+r_boton = gb.procesar_mensaje_whatsapp("ghl-boton-emitir", "Asegurar mi auto (Emitir)")
+check(r_boton is None, f"responder al boton 'Emitir' hace que el bot no conteste nada (obtuvo {r_boton!r})")
+check("ghl-boton-emitir" not in gb.CONVERSACIONES,
+      "responder al boton 'Emitir' limpia la fase local obsoleta (esperando_cotizacion)")
+
+gb.CONVERSACIONES.clear()
+r_boton_asesor = gb.procesar_mensaje_whatsapp("ghl-boton-asesor", "Hablar con asesor (Dudas)")
+check(r_boton_asesor is None,
+      f"responder al boton 'Hablar con asesor' hace que el bot no conteste nada (obtuvo {r_boton_asesor!r}) "
+      f"-- y NO cae en el resguardo viejo de 'ya quedo tu cita en proceso'")
+
+gb.CONVERSACIONES.clear()
+
+# (la prueba del endpoint /ghl/webhook completo para este caso -- que
+# enviado=False y no truene -- vive en test_api.py, que ya tiene un
+# TestClient armado)
+
 print("\n=== TODO OK (segupoliza) ===")

@@ -281,3 +281,39 @@ real): la forma exacta de cada Opportunity en la respuesta (`name`,
 usa tu cuenta) — si el comando siempre regresa "no tienes ninguna
 cotización abierta" aunque sepas que sí hay una, es lo primero que hay que
 revisar (`_contact_id_de_opportunity` en `ghl_bridge.py`).
+
+### El bot ignora la respuesta a los botones nativos de GHL
+
+En este modo, cuando Segupoliza le entrega el resultado a GHL, es un
+workflow de GHL (no nuestro backend) el que le manda al cliente el mensaje
+de WhatsApp *"Tu cotización está lista"* con el PDF y los dos botones
+interactivos **"Asegurar mi auto (Emitir)"** y **"Hablar con asesor
+(Dudas)"**. Ese mensaje, y todo lo que pase después (el cliente tocando un
+botón, o contestando con texto libre), lo tiene que manejar por completo
+ese mismo workflow de GHL — es quien inició esa parte de la conversación.
+
+El problema: nuestro webhook `/ghl/webhook` sigue recibiendo, en principio,
+**todos** los mensajes entrantes de ese contacto (mismo trigger "Customer
+Replied" de siempre). Sin un resguardo, si el cliente le picaba a un botón
+o contestaba "quiero asegurarlo", nuestro bot lo procesaba como si fuera
+una respuesta más del flujo de cotización de vehículos (o, peor, caía en
+el resguardo viejo de "ASESOR" -> "ya quedó tu cita en proceso", un mensaje
+que no tiene nada que ver con esto) — las dos conversaciones se pisaban y
+el cliente recibía respuestas duplicadas o confusas.
+
+**Solución:** `ghl_bridge._es_respuesta_botones_cotizacion_ghl()` reconoce
+esas respuestas (por palabras clave: "EMITIR", "ASEGURAR MI AUTO", "HABLAR"
++ "ASESOR", "DUDAS") como comando global — se revisa al principio de
+`procesar_mensaje_whatsapp()`, antes que cualquier fase — y cuando matchea:
+
+- El bot **no contesta nada por WhatsApp de su lado** (`procesar_mensaje_whatsapp`
+  devuelve `None`, y `/ghl/webhook` responde `enviado=false` sin error, sin
+  llamar `enviar_whatsapp`).
+- Se limpia cualquier fase local que hubiera quedado a medias para ese
+  contacto (ej. `esperando_cotizacion`), porque evidentemente el resultado
+  ya se resolvió vía GHL directo y esa fase quedó obsoleta.
+
+Esto deja que el workflow de GHL sea el único que reacciona a esos botones,
+sin que nuestro bot interfiera. Si más adelante cambian el texto exacto de
+los botones en GHL, hay que revisar/ajustar las palabras clave en esa
+función.
