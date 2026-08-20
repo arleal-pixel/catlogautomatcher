@@ -99,9 +99,14 @@ def inferir_genero(nombre_completo: str) -> str:
     en "A" -> femenino, si no -> masculino) con una lista corta de
     excepciones comunes. Esto es una ESTIMACION, no una fuente confiable --
     hay nombres genuinamente ambiguos (ej. "Guadalupe", ya cubierto arriba,
-    pero pueden faltar otros). Se usa solo porque Segupoliza requiere este
-    campo y decidimos no preguntarlo directamente en la conversacion (ver
-    decision del 2026-08-19)."""
+    pero pueden faltar otros).
+
+    Es el FALLBACK DETERMINISTA -- SIEMPRE devuelve algo (nunca None), a
+    diferencia de inferir_genero_o_none() (basada en la libreria
+    gender-guesser, mas precisa pero puede no saber). Se usa como ultimo
+    recurso en armar_payload() cuando ni el cliente confirmo un genero en
+    la conversacion ni gender-guesser pudo inferirlo -- Segupoliza requiere
+    este campo, asi que siempre hay que mandar algo."""
     partes = (nombre_completo or "").strip().split()
     if not partes:
         return "M"
@@ -111,6 +116,57 @@ def inferir_genero(nombre_completo: str) -> str:
     if primero in _MASCULINOS_EXCEPCION:
         return "M"
     return "F" if primero.endswith("A") else "M"
+
+
+# gender-guesser (https://pypi.org/project/gender-guesser/) -- base de
+# datos de nombres (no una regla simple como la de arriba), usada para
+# decidir cuando SI podemos inferir el genero con confianza y cuando mejor
+# hay que preguntarle al cliente (ver _avanzar_datos_conductor en
+# ghl_bridge.py, paso "genero"). Carga opcional -- si el paquete no esta
+# instalado, inferir_genero_o_none() siempre devuelve None y el flujo de
+# conversacion simplemente pregunta el genero (o cae al fallback
+# determinista de arriba si ni eso se llega a preguntar, ej. flujos viejos
+# via editar_uno). No es una dependencia dura del resto del proyecto.
+try:
+    import gender_guesser.detector as _gender_guesser_detector
+    _detector_genero = _gender_guesser_detector.Detector(case_sensitive=False)
+except ImportError:
+    _detector_genero = None
+
+_MAPA_GENDER_GUESSER = {
+    "male": "M",
+    "mostly_male": "M",
+    "female": "F",
+    "mostly_female": "F",
+    # "andy" (androgino) y "unknown" -- a proposito NO se mapean: es
+    # justo el caso donde queremos preguntarle al cliente en vez de
+    # adivinar (ver abajo, devuelve None).
+}
+
+
+def inferir_genero_o_none(nombre_completo: str) -> Optional[str]:
+    """Intenta inferir el genero del PRIMER nombre usando gender-guesser --
+    devuelve "M"/"F" solo cuando la libreria esta razonablemente segura
+    (male/mostly_male/female/mostly_female), o None cuando el nombre le
+    resulta ambiguo/androgino/desconocido ("andy"/"unknown") -- incluye
+    varios nombres de origen indigena/poco comunes en México que la base de
+    datos internacional de gender-guesser no reconoce.
+
+    A diferencia de inferir_genero() (que SIEMPRE devuelve algo), esta
+    funcion devolver None a proposito es la señal para que la conversacion
+    le pregunte al cliente directamente en vez de adivinar en silencio --
+    ver el paso "genero" en _avanzar_datos_conductor (ghl_bridge.py).
+
+    Si el paquete gender-guesser no esta instalado, siempre devuelve None
+    (no truena) -- el flujo de conversacion simplemente pregunta siempre en
+    ese caso."""
+    if _detector_genero is None:
+        return None
+    partes = (nombre_completo or "").strip().split()
+    if not partes:
+        return None
+    resultado = _detector_genero.get_gender(partes[0])
+    return _MAPA_GENDER_GUESSER.get(resultado)
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +195,19 @@ def armar_payload(vehiculo: dict, datos_conductor: dict) -> dict:
     - Year = vehiculo["anio"] (agregado a ResultadoOut/vehiculo justo para
       esto, ver main.py).
     - Name/FatherLastName/MotherLastName = dividir_nombre(nombre).
-    - Gender = datos_conductor["genero"] si ya viene (ej. mandado a mano en
-      pruebas), si no se infiere con inferir_genero() -- ver su docstring,
-      es una estimacion, no un dato confirmado por el cliente."""
-    nombre, apellido_paterno, apellido_materno = dividir_nombre(datos_conductor.get("nombre") or "")
-    genero = datos_conductor.get("genero") or inferir_genero(datos_conductor.get("nombre") or "")
+    - Gender: se usa datos_conductor["genero"] si ya viene -- normalmente SI
+      viene, porque la conversacion ya lo resolvio (gender-guesser con
+      confianza, o preguntandole al cliente cuando fue ambiguo, ver
+      _avanzar_datos_conductor en ghl_bridge.py). Solo como ultimo recurso
+      (flujos viejos/editar_uno que nunca pasaron por ese paso) se intenta
+      inferir_genero_o_none() y, si tampoco eso resuelve nada, el fallback
+      determinista inferir_genero() -- Segupoliza requiere este campo, asi
+      que siempre se manda algo."""
+    nombre_completo = datos_conductor.get("nombre") or ""
+    nombre, apellido_paterno, apellido_materno = dividir_nombre(nombre_completo)
+    genero = (datos_conductor.get("genero")
+              or inferir_genero_o_none(nombre_completo)
+              or inferir_genero(nombre_completo))
 
     return {
         "Name": nombre,

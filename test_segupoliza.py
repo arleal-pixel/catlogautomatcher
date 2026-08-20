@@ -35,6 +35,22 @@ check(seg.inferir_genero("Guadalupe Torres") == "F", "'Guadalupe' -> F (excepcio
 check(seg.inferir_genero("Andres Gomez") == "M", "'Andres' -> M (excepcion, termina en S)")
 check(seg.inferir_genero("") == "M", "nombre vacio no truena, cae a default M")
 
+# --- inferir_genero_o_none (gender-guesser) ---
+check(seg._detector_genero is not None, "gender-guesser SI esta instalado en este entorno (si esto falla, instalalo)")
+check(seg.inferir_genero_o_none("Gerardo Espinosa") == "M", "'Gerardo' -> M via gender-guesser")
+check(seg.inferir_genero_o_none("Ana Ejemplo") == "F", "'Ana' -> F via gender-guesser")
+check(seg.inferir_genero_o_none("Otro Nombre") is None,
+      "un primer nombre que gender-guesser no reconoce ('Otro') -> None (para preguntar, no adivinar)")
+check(seg.inferir_genero_o_none("") is None, "nombre vacio -> None, no truena")
+
+# si gender-guesser no estuviera instalado, inferir_genero_o_none SIEMPRE
+# devuelve None (nunca truena) -- se simula apagando el detector un momento
+_detector_original = seg._detector_genero
+seg._detector_genero = None
+check(seg.inferir_genero_o_none("Gerardo") is None,
+      "sin gender-guesser instalado (simulado), inferir_genero_o_none siempre devuelve None")
+seg._detector_genero = _detector_original
+
 # --- armar_payload ---
 vehiculo = {"clave": "01420201624", "marca": "VOLKSWAGEN", "descripcion": "JETTA A7 COMFORTLINE", "anio": "2020"}
 datos = {"nombre": "Gerardo Espinosa Gonzalez", "edad": 61, "codigo_postal": "44330",
@@ -54,6 +70,15 @@ check(payload["Zip"] == "44330", "armar_payload manda el CP capturado como Zip")
 datos_genero_explicito = dict(datos, genero="F")
 payload2 = seg.armar_payload(vehiculo, datos_genero_explicito)
 check(payload2["Gender"] == "F", "un 'genero' explicito en datos_conductor le gana a inferir_genero")
+
+# sin genero explicito y con un nombre que gender-guesser NO reconoce
+# ("Otro"), armar_payload cae al fallback determinista (inferir_genero) en
+# vez de mandar un Gender vacio -- Segupoliza requiere el campo siempre.
+datos_nombre_ambiguo = dict(datos, nombre="Otro Nombre")
+datos_nombre_ambiguo.pop("genero", None)
+payload3 = seg.armar_payload(vehiculo, datos_nombre_ambiguo)
+check(payload3["Gender"] in ("M", "F"),
+      f"con un nombre que gender-guesser no reconoce, igual se manda algo (fallback determinista) (obtuvo {payload3['Gender']!r})")
 
 # --------------------------------------------------------------------------
 # ghl_bridge: telefono, normalizacion, correlacion y el webhook real
@@ -346,7 +371,7 @@ check("ya tengo todos tus datos" in r_confirma.lower()
 # --- integrado end-to-end: el cliente da un correo DISTINTO al sugerido ---
 gb.CONVERSACIONES.clear()
 gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "corolla se 2021")
-gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "Otro Nombre")
+gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "Roberto Diaz")  # nombre inequivoco (no dispara el paso 'genero')
 gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "40")
 r_cp2 = gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "01000")
 check("ana@ejemplo.com" in r_cp2, "tambien sugiere el correo en este segundo caso")
@@ -358,5 +383,72 @@ check("ya tengo todos tus datos" in r_otro.lower()
       f"quedo={gb.CONVERSACIONES.get('ghl-correo-cambia')})")
 
 gb.obtener_correo_contacto_ghl = lambda contact_id: None  # deja el mock neutro para el resto
+
+# --------------------------------------------------------------------------
+# genero: solo se pregunta cuando gender-guesser NO esta seguro
+# --------------------------------------------------------------------------
+
+# --- nombre inequivoco -> NO pregunta genero, sigue directo a edad ---
+gb.CONVERSACIONES.clear()
+gb.procesar_mensaje_whatsapp("ghl-genero-claro", "corolla se 2021")
+r_nombre_claro = gb.procesar_mensaje_whatsapp("ghl-genero-claro", "Gerardo Espinosa")
+check("edad" in r_nombre_claro.lower() and "hombre o mujer" not in r_nombre_claro.lower()
+      and gb.CONVERSACIONES["ghl-genero-claro"]["paso"] == "edad"
+      and gb.CONVERSACIONES["ghl-genero-claro"]["datos"]["genero"] == "M",
+      f"nombre inequivoco (Gerardo) NO pregunta genero, sigue a edad directo (obtuvo {r_nombre_claro!r}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-genero-claro')})")
+
+# --- nombre ambiguo/desconocido -> SI pregunta genero antes de continuar ---
+gb.CONVERSACIONES.clear()
+gb.procesar_mensaje_whatsapp("ghl-genero-ambiguo", "corolla se 2021")
+r_nombre_ambiguo = gb.procesar_mensaje_whatsapp("ghl-genero-ambiguo", "Otro Nombre")
+check("hombre o mujer" in r_nombre_ambiguo.lower()
+      and gb.CONVERSACIONES["ghl-genero-ambiguo"]["paso"] == "genero",
+      f"nombre ambiguo (gender-guesser no lo reconoce) SI pregunta genero (obtuvo {r_nombre_ambiguo!r})")
+
+r_no_entendi = gb.procesar_mensaje_whatsapp("ghl-genero-ambiguo", "no se")
+check("no te entendí" in r_no_entendi.lower() and gb.CONVERSACIONES["ghl-genero-ambiguo"]["paso"] == "genero",
+      f"respuesta no reconocida al genero se re-pregunta, sin avanzar (obtuvo {r_no_entendi!r})")
+
+r_responde_genero = gb.procesar_mensaje_whatsapp("ghl-genero-ambiguo", "hombre")
+check("edad" in r_responde_genero.lower()
+      and gb.CONVERSACIONES["ghl-genero-ambiguo"]["datos"]["genero"] == "M"
+      and gb.CONVERSACIONES["ghl-genero-ambiguo"]["paso"] == "edad",
+      f"responder 'hombre' guarda M y sigue a edad (obtuvo {r_responde_genero!r}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-genero-ambiguo')})")
+
+# el flujo completo llega hasta el final sin problema
+gb.procesar_mensaje_whatsapp("ghl-genero-ambiguo", "35")
+gb.procesar_mensaje_whatsapp("ghl-genero-ambiguo", "01000")
+r_final = gb.procesar_mensaje_whatsapp("ghl-genero-ambiguo", "genero@ejemplo.com")
+check("ya tengo todos tus datos" in r_final.lower()
+      and gb.CONVERSACIONES.get("ghl-genero-ambiguo", {}).get("fase") == "esperando_cotizacion",
+      f"el flujo con genero preguntado llega hasta el final normal (obtuvo {r_final!r})")
+
+# --- _genero_valido: variantes reconocidas ---
+check(gb._genero_valido("mujer") == "F", "'mujer' -> F")
+check(gb._genero_valido("soy hombre") == "M", "'soy hombre' -> M")
+check(gb._genero_valido("F") == "F", "'F' sola -> F")
+check(gb._genero_valido("M") == "M", "'M' sola -> M")
+check(gb._genero_valido("no se") is None, "respuesta no reconocida -> None")
+
+# --- editar genero explicitamente en la fase de confirmar datos previos ---
+gb.CONVERSACIONES.clear()
+datos_previos_genero = {"nombre": "Gerardo Espinosa", "edad": 61, "codigo_postal": "44330",
+                         "correo": "g@ejemplo.com", "genero": "M"}
+gb.obtener_datos_conductor = lambda contact_id: dict(datos_previos_genero)
+gb.procesar_mensaje_whatsapp("ghl-cambia-genero", "corolla se 2021")
+r_pide_cambiar = gb.procesar_mensaje_whatsapp("ghl-cambia-genero", "quiero cambiar mi genero")
+check("hombre o mujer" in r_pide_cambiar.lower()
+      and gb.CONVERSACIONES["ghl-cambia-genero"]["editar_uno"] is True
+      and gb.CONVERSACIONES["ghl-cambia-genero"]["paso"] == "genero",
+      f"pedir cambiar el genero pide ese campo solo (obtuvo {r_pide_cambiar!r})")
+
+r_cambia_ok = gb.procesar_mensaje_whatsapp("ghl-cambia-genero", "mujer")
+check("ya tengo todos tus datos" in r_cambia_ok.lower()
+      and gb.CONVERSACIONES.get("ghl-cambia-genero", {}).get("fase") == "esperando_cotizacion",
+      f"cambiar solo el genero finaliza directo sin re-pedir el resto (obtuvo {r_cambia_ok!r})")
+
+gb.obtener_datos_conductor = lambda contact_id: None  # deja el mock neutro para el resto
 
 print("\n=== TODO OK (segupoliza) ===")

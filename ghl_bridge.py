@@ -44,9 +44,9 @@ GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
 # conductor_nombre, conductor_edad, conductor_codigo_postal,
 # auto_cotizacion_resultado, canal (TEXT, agregado para distinguir
 # "whatsapp" vs "voz" -- ver mcp_server.py y GHL_VOICE_MCP.md), y
-# conductor_correo (TEXT, agregado para la API real de Segupoliza -- ver
-# COTIZADOR_AUTO_CONTRATO.md). Ambos hay que agregarlos a mano en el schema
-# del objeto en GHL antes de usarlos.
+# conductor_correo, y conductor_genero (ambos TEXT, agregados para la API
+# real de Segupoliza -- ver COTIZADOR_AUTO_CONTRATO.md). Hay que agregarlos
+# a mano en el schema del objeto en GHL antes de usarlos.
 # "contacto" es un campo de texto normal (NO una asociacion nativa de GHL)
 # donde guardamos el contactId -- por eso las busquedas de abajo filtran
 # por ese valor.
@@ -365,6 +365,7 @@ def crear_registro_cotizacion(
         "conductor_edad": str(datos_conductor.get("edad") or ""),
         "conductor_codigo_postal": datos_conductor.get("codigo_postal") or "",
         "conductor_correo": datos_conductor.get("correo") or "",
+        "conductor_genero": datos_conductor.get("genero") or "",
         "canal": canal,
     }
     if resultado_cotizacion is not None:
@@ -446,12 +447,17 @@ def obtener_datos_conductor(contact_id: str) -> Optional[dict]:
     except (TypeError, ValueError):
         return None
 
-    # correo es opcional -- registros de antes de que este campo existiera
-    # no lo tienen, y eso NO invalida el resto de los datos guardados (ver
-    # _avanzar_confirmar_datos_conductor, que pide el correo aparte si falta).
+    # correo y genero son opcionales -- registros de antes de que estos
+    # campos existieran no los tienen, y eso NO invalida el resto de los
+    # datos guardados (ver _avanzar_confirmar_datos_conductor, que pide el
+    # correo aparte si falta; el genero, si falta, se re-infiere/pregunta
+    # solo si el cliente pide cambiarlo explicitamente -- no se reabre el
+    # flujo solo por esto, a diferencia del correo).
     correo = propiedades.get("conductor_correo") or None
+    genero = propiedades.get("conductor_genero") or None
 
-    return {"nombre": str(nombre).strip(), "edad": edad, "codigo_postal": str(cp).strip(), "correo": correo}
+    return {"nombre": str(nombre).strip(), "edad": edad, "codigo_postal": str(cp).strip(),
+            "correo": correo, "genero": genero}
 
 
 def enviar_a_cotizar(contact_id: str, vehiculo: dict, datos_conductor: dict) -> bool:
@@ -955,7 +961,7 @@ def _iniciar_datos_conductor(contact_id: str, vehiculo: dict) -> str:
         return (f"Ya tengo tus datos de antes: *{datos_previos['nombre']}*, "
                 f"{datos_previos['edad']} años, CP {datos_previos['codigo_postal']}{detalle_correo}. "
                 "¿Sigue igual? Responde \"sí\" para continuar, o dime qué quieres "
-                "cambiar (nombre, edad, código postal o correo).")
+                "cambiar (nombre, edad, código postal, correo o género).")
 
     CONVERSACIONES[contact_id] = {
         "fase": "datos_conductor",
@@ -1011,6 +1017,12 @@ def _avanzar_confirmar_datos_conductor(contact_id: str, conv: dict, texto: str) 
         conv["editar_uno"] = True
         return _PREGUNTAS_CONDUCTOR["correo"]
 
+    if "GENERO" in t or "SEXO" in t:
+        conv["fase"] = "datos_conductor"
+        conv["paso"] = "genero"
+        conv["editar_uno"] = True
+        return _PREGUNTA_GENERO
+
     conv["fase"] = "datos_conductor"
     conv["paso"] = "nombre"
     conv["datos"] = {}
@@ -1039,6 +1051,22 @@ def _correo_valido(texto: str) -> Optional[str]:
     return m.group(0).lower() if m else None
 
 
+_PREGUNTA_GENERO = "Para completar tu cotización, ¿el conductor es hombre o mujer?"
+
+
+def _genero_valido(texto: str) -> Optional[str]:
+    """Interpreta la respuesta a _PREGUNTA_GENERO -- solo se llega aqui
+    cuando segupoliza.inferir_genero_o_none() no pudo inferir el genero con
+    confianza a partir del nombre (ver paso "genero" en
+    _avanzar_datos_conductor), asi que se le pregunta directo al cliente."""
+    t = disc.normalizar(texto or "")
+    if t == "F" or any(p in t for p in ("MUJER", "FEMENINO", "FEMENIL")):
+        return "F"
+    if t == "M" or any(p in t for p in ("HOMBRE", "MASCULINO", "VARON")):
+        return "M"
+    return None
+
+
 def _avanzar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
     """Procesa un mensaje mientras se recolectan nombre/edad/codigo postal.
     Un paso invalido (edad o CP que no calzan) se re-pregunta con una nota,
@@ -1056,6 +1084,28 @@ def _avanzar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
         if len(texto) < 3:
             return "No me quedó claro tu nombre completo, ¿me lo repites?"
         conv["datos"]["nombre"] = texto
+        if editar_uno:
+            return _finalizar_datos_conductor(contact_id, conv)
+        # gender-guesser (segupoliza_client.inferir_genero_o_none) intenta
+        # inferir el genero del nombre -- si esta razonablemente seguro, se
+        # guarda directo y seguimos con edad sin preguntar nada de mas. Si
+        # el nombre le resulta ambiguo/desconocido (None), se le pregunta
+        # al cliente en vez de adivinar en silencio (ver paso "genero").
+        genero = segupoliza.inferir_genero_o_none(texto)
+        if genero is None:
+            conv["paso"] = "genero"
+            conv["actualizado"] = datetime.now(timezone.utc).isoformat()
+            return _PREGUNTA_GENERO
+        conv["datos"]["genero"] = genero
+        conv["paso"] = "edad"
+        conv["actualizado"] = datetime.now(timezone.utc).isoformat()
+        return _PREGUNTAS_CONDUCTOR["edad"]
+
+    if paso == "genero":
+        genero = _genero_valido(texto)
+        if genero is None:
+            return "No te entendí -- ¿el conductor es hombre o mujer?"
+        conv["datos"]["genero"] = genero
         if editar_uno:
             return _finalizar_datos_conductor(contact_id, conv)
         conv["paso"] = "edad"

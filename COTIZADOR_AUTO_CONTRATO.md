@@ -61,10 +61,28 @@ Cómo se arma cada campo (todo en `segupoliza_client.armar_payload`):
   `dividir_nombre()` (heurística: 1 palabra → todo a Name; 2 → Name +
   paterno; 3 → Name + paterno + materno; 4+ → las últimas 2 son los
   apellidos, el resto es el nombre).
-- `Gender`: NO se pregunta en la conversación — se infiere del primer
-  nombre con `inferir_genero()` (regla simple "termina en A → F", con una
-  lista corta de excepciones comunes tipo "Guadalupe" o "Andrés). Es una
-  estimación, no un dato confirmado por el cliente.
+- `Gender`: se intenta inferir del primer nombre con la librería
+  [`gender-guesser`](https://pypi.org/project/gender-guesser/) (base de
+  datos de nombres, no una regla simple) — ver
+  `segupoliza_client.inferir_genero_o_none()`. Si está razonablemente
+  segura (nombre claramente masculino o femenino), se guarda directo y NO
+  se le pregunta nada al cliente. Si el nombre le resulta
+  ambiguo/desconocido (bastante común con nombres de origen indígena o
+  poco frecuentes en México, que la base de datos internacional de la
+  librería no siempre reconoce), el bot SÍ pregunta directamente "¿el
+  conductor es hombre o mujer?" antes de continuar — ver el paso `"genero"`
+  en `_avanzar_datos_conductor` (`ghl_bridge.py`). Solo como último recurso
+  (flujos viejos que nunca pasaron por este paso) se usa el fallback
+  determinista `inferir_genero()` (regla simple "termina en A → F"), para
+  garantizar que siempre se manda algo — Segupoliza requiere el campo.
+  Igual que nombre/edad/CP/correo, se puede corregir escribiendo "quiero
+  cambiar mi género" en cualquier momento, y se guarda para cotizaciones
+  futuras del mismo contacto (`conductor_genero` en el Custom Object).
+  **Nota de licencia:** `gender-guesser` se distribuye bajo GPLv3 —
+  revísalo antes de usarlo en producción si tienes requisitos de licencia
+  particulares. Es una dependencia opcional: sin ella instalada, el bot
+  simplemente pregunta el género siempre, en vez de solo cuando es
+  ambiguo.
 - `Phone`: el teléfono que GHL manda en el webhook de entrada (ver
   `TELEFONOS` en `ghl_bridge.py`) — también es la ÚNICA forma de
   correlacionar el resultado cuando llegue (ver paso 2).

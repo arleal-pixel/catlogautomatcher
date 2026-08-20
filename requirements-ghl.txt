@@ -2,3 +2,14 @@
 # Sin esto instalado, el endpoint responde 501 pero el resto de la API
 # funciona normal (mismo patron que requirements-ocr.txt).
 httpx>=0.27
+
+# Usada para inferir el genero del conductor a partir de su nombre (base de
+# datos de nombres, no una regla simple) antes de decidir si hace falta
+# preguntarlo -- ver segupoliza_client.inferir_genero_o_none() y
+# COTIZADOR_AUTO_CONTRATO.md. Opcional: si no esta instalado, el bot
+# simplemente pregunta el genero SIEMPRE en vez de solo cuando es ambiguo
+# (no rompe nada, ver el try/except al importarla en segupoliza_client.py).
+# NOTA DE LICENCIA: gender-guesser se distribuye bajo GPLv3 -- revisa que
+# esto sea aceptable para tu forma de distribuir/operar el proyecto antes
+# de usarlo en produccion.
+gender-guesser>=0.4.0
