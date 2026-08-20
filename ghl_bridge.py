@@ -190,6 +190,32 @@ def buscar_contact_id_por_telefono(telefono: str) -> Optional[str]:
     return contacto.get("id")
 
 
+def obtener_correo_contacto_ghl(contact_id: str) -> Optional[str]:
+    """GET /contacts/{contactId} -- lee el correo NATIVO del Contact de GHL
+    (el campo 'email' del contacto, capturado por cualquier fuente ajena a
+    nuestro bot -- un formulario web, una importación, otro workflow, etc.).
+
+    Se usa SOLO para SUGERIRSELO al cliente y que confirme si lo quiere usar
+    o prefiere darnos otro -- nunca se guarda ni se usa para cotizar sin que
+    el cliente lo confirme primero (ver _pregunta_correo). Complementa a
+    `conductor_correo` del Custom Object chatbotprinciap (que solo tiene
+    algo si NUESTRO bot ya lo preguntó antes) -- este es un origen distinto
+    y puede tener dato aunque sea la primera vez que el contacto cotiza con
+    el bot.
+
+    Devuelve None si el contacto no tiene correo. Si la llamada a GHL falla,
+    levanta GHLError -- es responsabilidad del caller (_pregunta_correo)
+    atraparlo y tratarlo como "no lo sabemos" sin romper la conversación
+    (mismo patrón que el resto de las lecturas de GHL en este archivo)."""
+    with httpx.Client(timeout=15) as client:
+        r = client.get(f"{GHL_API_BASE}/contacts/{contact_id}", headers=_headers())
+    if r.status_code >= 300:
+        raise GHLError(f"GHL (obtener contacto) respondio {r.status_code}: {r.text[:300]}")
+    contacto = r.json().get("contact") or {}
+    correo = contacto.get("email")
+    return correo.strip() if isinstance(correo, str) and correo.strip() else None
+
+
 def agregar_tag(contact_id: str, tag: str) -> None:
     """POST /contacts/{contactId}/tags -- usado para marcar el contacto como
     'listo para agendar' al terminar de recolectar los datos del conductor.
@@ -808,6 +834,28 @@ _PREGUNTAS_CONDUCTOR = {
 }
 
 
+def _pregunta_correo(contact_id: str, conv: dict) -> str:
+    """Arma la pregunta del correo. Antes de pedirlo de cero, revisa si GHL
+    ya tiene uno guardado NATIVAMENTE en el Contact (ver
+    obtener_correo_contacto_ghl -- puede venir de un formulario web, otra
+    integración, etc., sin que nuestro bot lo haya preguntado antes). Si lo
+    encuentra, lo guarda temporalmente en conv["correo_sugerido"] y le pide
+    al cliente que lo confirme o dé uno distinto -- en vez de preguntarle
+    algo que probablemente ya le dieron a la empresa en otro canal. Ver el
+    manejo de conv["correo_sugerido"] en _avanzar_datos_conductor (paso
+    "correo")."""
+    try:
+        correo_ghl = obtener_correo_contacto_ghl(contact_id)
+    except Exception as e:
+        print(f"[correo-sugerido] fallo consultando el contacto en GHL para {contact_id}: {e}")
+        correo_ghl = None
+    if correo_ghl:
+        conv["correo_sugerido"] = correo_ghl
+        return (f"Veo que tu correo registrado es {correo_ghl}. ¿Lo dejamos así? Responde \"sí\", "
+                "o escribe el correo que quieres usar.")
+    return _PREGUNTAS_CONDUCTOR["correo"]
+
+
 def _formatear_resultado_cotizacion(vehiculo: dict, resultado: dict) -> str:
     """Arma el mensaje de WhatsApp con el resultado de la cotizacion + la
     pregunta de agendar/cotizar otro (ver recibir_resultado_cotizacion).
@@ -936,7 +984,7 @@ def _avanzar_confirmar_datos_conductor(contact_id: str, conv: dict, texto: str) 
             conv["fase"] = "datos_conductor"
             conv["paso"] = "correo"
             conv.pop("editar_uno", None)
-            return _PREGUNTAS_CONDUCTOR["correo"]
+            return _pregunta_correo(contact_id, conv)
         return _finalizar_datos_conductor(contact_id, conv)
 
     if "NOMBRE" in t:
@@ -1034,13 +1082,29 @@ def _avanzar_datos_conductor(contact_id: str, conv: dict, texto: str) -> str:
             return _finalizar_datos_conductor(contact_id, conv)
         conv["paso"] = "correo"
         conv["actualizado"] = datetime.now(timezone.utc).isoformat()
-        return _PREGUNTAS_CONDUCTOR["correo"]
+        return _pregunta_correo(contact_id, conv)
 
-    # paso == "correo" -- ultimo paso siempre, con o sin editar_uno
+    # paso == "correo" -- ultimo paso siempre, con o sin editar_uno.
+    # Si _pregunta_correo() encontro un correo ya registrado en GHL, queda
+    # guardado en conv["correo_sugerido"] -- una afirmacion lo confirma
+    # directo, sin tener que volver a escribirlo.
+    correo_sugerido = conv.get("correo_sugerido")
+    if correo_sugerido:
+        t = disc.normalizar(texto)
+        if t in disc._AFIRMACIONES or t in {"SI", "SIGUE IGUAL", "CONTINUAR", "CORRECTO", "OK",
+                                             "ESTA BIEN", "DEJALO ASI", "DEJALO", "CONFIRMO"}:
+            conv["datos"]["correo"] = correo_sugerido
+            conv.pop("correo_sugerido", None)
+            return _finalizar_datos_conductor(contact_id, conv)
+
     correo = _correo_valido(texto)
     if correo is None:
+        if correo_sugerido:
+            return (f"No reconocí eso. Si quieres mantener {correo_sugerido} responde \"sí\", "
+                     "o escribe el correo que quieres usar.")
         return "No reconocí un correo válido, ¿me lo repites? (ej. nombre@ejemplo.com)"
     conv["datos"]["correo"] = correo
+    conv.pop("correo_sugerido", None)
     return _finalizar_datos_conductor(contact_id, conv)
 
 
@@ -1229,5 +1293,15 @@ def procesar_mensaje_whatsapp(
         }
         return texto_out
 
+    # Resuelto de un jalon, sin haber necesitado sesion (ej. "corolla se
+    # 2021" matchea exacto en un solo mensaje) -- BUG corregido: antes esto
+    # devolvia solo el "Listo, encontre tu version..." y la conversacion se
+    # quedaba ahi, sin pasar a pedir los datos del conductor (a diferencia
+    # de _avanzar(), que SI hace esto cuando el vehiculo se resuelve
+    # despues de una sesion de preguntas). Mismo tratamiento que ahi.
     texto_out, _ = _formatear_respuesta(salida.resultado)
+    if salida.resultado.estado == "resuelto":
+        vehiculo = {"clave": salida.resultado.clave, "descripcion": salida.resultado.descripcion,
+                    "marca": salida.resultado.marca, "anio": salida.resultado.anio}
+        texto_out += "\n\n" + _iniciar_datos_conductor(contact_id, vehiculo)
     return texto_out

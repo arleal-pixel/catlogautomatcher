@@ -293,4 +293,70 @@ respuesta_error = gb.procesar_mensaje_whatsapp("ghl-error", "cotizaciones abiert
 check("no pude consultar el estado" in respuesta_error.lower(),
       f"si falla la consulta a GHL, responde con un mensaje claro en vez de tronar (obtuvo {respuesta_error!r})")
 
+# --------------------------------------------------------------------------
+# correo sugerido desde el Contact nativo de GHL (no solo desde
+# nuestro propio Custom Object) -- ver _pregunta_correo/obtener_correo_contacto_ghl
+# --------------------------------------------------------------------------
+
+# --- _pregunta_correo: si GHL tiene correo nativo, lo sugiere y lo guarda en conv ---
+gb.obtener_correo_contacto_ghl = lambda contact_id: "gerardo@ejemplo.com" if contact_id == "c-con-correo" else None
+
+conv_con = {}
+pregunta_con = gb._pregunta_correo("c-con-correo", conv_con)
+check("gerardo@ejemplo.com" in pregunta_con and conv_con.get("correo_sugerido") == "gerardo@ejemplo.com",
+      f"si GHL ya tiene correo nativo, se sugiere y se guarda en conv['correo_sugerido'] (obtuvo {pregunta_con!r})")
+
+conv_sin = {}
+pregunta_sin = gb._pregunta_correo("c-sin-correo", conv_sin)
+check(pregunta_sin == gb._PREGUNTAS_CONDUCTOR["correo"] and "correo_sugerido" not in conv_sin,
+      f"sin correo nativo en GHL, se pregunta de cero como antes (obtuvo {pregunta_sin!r})")
+
+# si falla la consulta a GHL, no truena -- se pregunta de cero igual
+def _falla_correo(contact_id):
+    raise gb.GHLError("simulado: GHL no respondio")
+gb.obtener_correo_contacto_ghl = _falla_correo
+conv_falla = {}
+pregunta_falla = gb._pregunta_correo("c-cualquiera", conv_falla)
+check(pregunta_falla == gb._PREGUNTAS_CONDUCTOR["correo"] and "correo_sugerido" not in conv_falla,
+      f"si falla la consulta a GHL, no truena -- se pregunta de cero (obtuvo {pregunta_falla!r})")
+
+# --- integrado end-to-end: confirmar el correo sugerido con "si" ---
+gb.CONVERSACIONES.clear()
+gb.TELEFONOS.clear()
+gb.crear_registro_cotizacion = lambda *a, **k: "rec-correo-1"
+gb.enviar_a_cotizar = lambda *a, **k: False
+gb.obtener_datos_conductor = lambda contact_id: None  # primera vez, sin datos guardados de antes
+gb.obtener_correo_contacto_ghl = lambda contact_id: "ana@ejemplo.com"
+
+r1 = gb.procesar_mensaje_whatsapp("ghl-correo-sugerido", "corolla se 2021")
+check("ana@ejemplo.com" not in r1, "el correo sugerido NO aparece antes de llegar al paso de correo")
+
+gb.procesar_mensaje_whatsapp("ghl-correo-sugerido", "Ana Ejemplo")  # nombre
+gb.procesar_mensaje_whatsapp("ghl-correo-sugerido", "35")            # edad
+r_cp = gb.procesar_mensaje_whatsapp("ghl-correo-sugerido", "01000")  # cp -> dispara la sugerencia
+check("ana@ejemplo.com" in r_cp and gb.CONVERSACIONES["ghl-correo-sugerido"]["correo_sugerido"] == "ana@ejemplo.com",
+      f"al llegar al paso de correo, sugiere el correo nativo de GHL (obtuvo {r_cp!r})")
+
+r_confirma = gb.procesar_mensaje_whatsapp("ghl-correo-sugerido", "si")
+check("ya tengo todos tus datos" in r_confirma.lower()
+      and gb.CONVERSACIONES.get("ghl-correo-sugerido", {}).get("datos", {}).get("correo") == "ana@ejemplo.com",
+      f"confirmar con 'si' usa el correo sugerido sin tener que volver a escribirlo (obtuvo {r_confirma!r}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-correo-sugerido')})")
+
+# --- integrado end-to-end: el cliente da un correo DISTINTO al sugerido ---
+gb.CONVERSACIONES.clear()
+gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "corolla se 2021")
+gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "Otro Nombre")
+gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "40")
+r_cp2 = gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "01000")
+check("ana@ejemplo.com" in r_cp2, "tambien sugiere el correo en este segundo caso")
+
+r_otro = gb.procesar_mensaje_whatsapp("ghl-correo-cambia", "otro@correo.com")
+check("ya tengo todos tus datos" in r_otro.lower()
+      and gb.CONVERSACIONES.get("ghl-correo-cambia", {}).get("datos", {}).get("correo") == "otro@correo.com",
+      f"si el cliente escribe un correo distinto al sugerido, se usa ese (obtuvo {r_otro!r}, "
+      f"quedo={gb.CONVERSACIONES.get('ghl-correo-cambia')})")
+
+gb.obtener_correo_contacto_ghl = lambda contact_id: None  # deja el mock neutro para el resto
+
 print("\n=== TODO OK (segupoliza) ===")

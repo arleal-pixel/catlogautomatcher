@@ -501,6 +501,19 @@ d = r.json()
 check(d["ok"] and d["respuesta"].startswith("Listo, encontré tu versión:\n*TOYOTA "),
       f"mensaje 'resuelto' de WhatsApp incluye la marca (obtuvo {d.get('respuesta')})")
 
+# BUG real reportado: cuando el vehiculo se resuelve DE UN JALON en un solo
+# mensaje de texto libre (sin pasar por sesion de preguntas, ej. "corolla se
+# 2021" matchea exacto de una), la conversacion se quedaba solo en "Listo,
+# encontre tu version..." y NUNCA pasaba a pedir los datos del conductor.
+gb.CONVERSACIONES.clear()
+r = client.post("/ghl/webhook", json={"contact_id": "ghl-resuelto-directo", "mensaje": "corolla se 2021"})
+d = r.json()
+check(d["ok"] and "listo, encontré tu versión" in d["respuesta"].lower()
+      and "nombre completo" in d["respuesta"].lower()
+      and gb.CONVERSACIONES.get("ghl-resuelto-directo", {}).get("fase") == "datos_conductor",
+      f"resolver el vehiculo de un jalon (sin sesion previa) SI continua pidiendo datos del "
+      f"conductor (obtuvo {d.get('respuesta')})")
+
 # opciones numeradas en 'aclaracion' -- contestar solo "2" elige la 2a opcion
 gb.CONVERSACIONES.clear()
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-num1", "mensaje": "corolla 2024"})

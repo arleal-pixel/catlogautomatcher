@@ -68,9 +68,14 @@ Cómo se arma cada campo (todo en `segupoliza_client.armar_payload`):
 - `Phone`: el teléfono que GHL manda en el webhook de entrada (ver
   `TELEFONOS` en `ghl_bridge.py`) — también es la ÚNICA forma de
   correlacionar el resultado cuando llegue (ver paso 2).
-- `Email`: se pregunta en la conversación ("¿Cuál es tu correo
-  electrónico?"), una sola vez — si el contacto ya cotizó antes y ya lo
-  tenemos guardado, no se le vuelve a pedir.
+- `Email`: se pregunta en la conversación una sola vez — pero antes de
+  preguntarlo de cero, se revisa si ya lo tenemos guardado (de una
+  cotización anterior con este bot) o si GHL ya tiene un correo nativo en
+  el Contact (capturado por cualquier otra fuente — formulario web, otra
+  integración, etc.). Si lo encuentra en cualquiera de los dos lugares, se
+  lo sugiere al cliente para que solo confirme ("sí") o dé uno distinto —
+  ver `_pregunta_correo()` / `obtener_correo_contacto_ghl()` en
+  `ghl_bridge.py`.
 - `Zip`, `Age`: ya se preguntaban de antes (código postal, edad).
 - `VehicleCode`: es la misma `clave` interna que ya resolvemos con el motor
   de vehículos — confirmado que es el mismo código, sin mapeo aparte.
