@@ -72,11 +72,16 @@ el canal), hace falta:
 3. Con eso, cada cotización de voz se guarda como un registro nuevo en
    `chatbotprinciap` con `canal="voz"` (los de WhatsApp siguen guardándose
    con `canal="whatsapp"`, sin que tengas que tocar nada de ese flujo) --
-   mismo historial por contacto, un solo objeto, filtrable por canal. Si el
-   guardado falla por cualquier motivo (credenciales, red, el campo `canal`
-   todavía no existe, no se encontró el contacto), el cliente de todas
-   formas recibe su cotización -- el error solo queda en el log del
-   servidor.
+   mismo historial por contacto, un solo objeto, filtrado por canal (ver
+   `buscar_registro_conductor` en `ghl_bridge.py`). Este filtro no es solo
+   informativo: el bot de WhatsApp SOLO lee registros con `canal="whatsapp"`
+   al decidir si ya tiene los datos del conductor de una cotización anterior
+   (`obtener_datos_conductor`) -- así, si el mismo contacto cotizó antes por
+   teléfono, WhatsApp no le "confirma" esos datos como si fueran de una
+   conversación de WhatsApp anterior (ni al revés). Si el guardado falla por
+   cualquier motivo (credenciales, red, el campo `canal` todavía no existe,
+   no se encontró el contacto), el cliente de todas formas recibe su
+   cotización -- el error solo queda en el log del servidor.
 
 ## Probarlo localmente (antes de desplegar)
 

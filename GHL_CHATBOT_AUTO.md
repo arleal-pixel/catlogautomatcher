@@ -227,6 +227,18 @@ mensaje (ej. "cambia mi nombre y mi CP"), solo toma el primero que
 detecta (nombre > edad > CP, en ese orden) y cotiza con ese cambio nada
 más — para cambiar varios, hay que hacerlo uno a la vez.
 
+**Separado de las cotizaciones por Voice AI:** el mismo `contactId` puede
+cotizar tanto por WhatsApp como por teléfono (Voice AI, ver
+`GHL_VOICE_MCP.md`) — cada cotización se guarda con un campo `canal`
+(`"whatsapp"` o `"voz"`, ver `crear_registro_cotizacion` en
+`ghl_bridge.py`). `obtener_datos_conductor` solo lee registros con
+`canal="whatsapp"`, así que una cotización hecha por teléfono nunca se le
+"confirma" a un cliente por WhatsApp como si fuera suya de antes (ni al
+revés) — cada canal tiene su propio historial de datos del conductor, aun
+para el mismo contacto. Los registros guardados antes de que existiera el
+campo `canal` cuentan como `"whatsapp"` (era el único canal que existía
+entonces).
+
 ### C2 — El webhook que recibe el resultado: `POST /cotizador-auto/webhook`
 
 **Actualizado — ya no es un contrato hipotético.** Este endpoint ahora

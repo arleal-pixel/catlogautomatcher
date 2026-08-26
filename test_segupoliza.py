@@ -109,6 +109,12 @@ check(payload_dos_palabras["FatherLastName"] == "Leal" and payload_dos_palabras[
 # --------------------------------------------------------------------------
 import ghl_bridge as gb
 
+# guardado ANTES de que el resto del archivo empiece a monkeypatchear
+# gb.obtener_datos_conductor con lambdas (ver mas abajo) -- se necesita la
+# funcion real intacta para la prueba de separacion de canal al final del
+# archivo.
+_obtener_datos_conductor_real = gb.obtener_datos_conductor
+
 # --- _normalizar_telefono ---
 check(gb._normalizar_telefono("+523330079224") == "3330079224", "normaliza +52... a 10 digitos")
 check(gb._normalizar_telefono("523330079224") == "3330079224", "normaliza sin '+' igual")
@@ -521,5 +527,99 @@ gb.CONVERSACIONES.clear()
 # (la prueba del endpoint /ghl/webhook completo para este caso -- que
 # enviado=False y no truene -- vive en test_api.py, que ya tiene un
 # TestClient armado)
+
+# --------------------------------------------------------------------------
+# buscar_registro_conductor / obtener_datos_conductor: separar WhatsApp de
+# Voz. Un mismo contact_id puede haber cotizado por los dos canales -- sin
+# filtrar por "canal", "el registro mas reciente de este contacto" podia
+# ser uno de voz aunque estemos a mitad de una conversacion de WhatsApp (o
+# al reves), mezclando datos del conductor entre los dos flujos.
+# --------------------------------------------------------------------------
+
+class _RespuestaRegistrosFalsa:
+    status_code = 200
+    def __init__(self, registros):
+        self._registros = registros
+    def json(self):
+        return {"records": self._registros}
+
+class _ClienteRegistrosFalso:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def post(self, *a, **k): return _RespuestaRegistrosFalsa(_REGISTROS_MEZCLADOS)
+
+# dos registros del MISMO contacto, uno por cada canal -- el de voz es mas
+# reciente (createdAt mayor), asi que sin filtro de canal "el mas reciente"
+# seria el de voz.
+_REGISTROS_MEZCLADOS = [
+    {"id": "rec-whatsapp", "createdAt": "2026-08-01T10:00:00Z",
+     "properties": {"contacto": "c-mixto", "conductor_nombre": "De WhatsApp", "canal": "whatsapp"}},
+    {"id": "rec-voz", "createdAt": "2026-08-02T10:00:00Z",
+     "properties": {"contacto": "c-mixto", "conductor_nombre": "De Voz", "canal": "voz"}},
+    {"id": "rec-otro-contacto", "createdAt": "2026-08-03T10:00:00Z",
+     "properties": {"contacto": "c-otro", "conductor_nombre": "No es de este contacto", "canal": "whatsapp"}},
+]
+
+gb.GHL_API_TOKEN = "fake-token"
+_httpx_original2 = gb.httpx.Client
+gb.httpx.Client = _ClienteRegistrosFalso
+try:
+    reg_whatsapp = gb.buscar_registro_conductor("c-mixto", canal="whatsapp")
+    reg_voz = gb.buscar_registro_conductor("c-mixto", canal="voz")
+    reg_sin_filtro = gb.buscar_registro_conductor("c-mixto")
+finally:
+    gb.httpx.Client = _httpx_original2
+
+check(reg_whatsapp is not None and reg_whatsapp["id"] == "rec-whatsapp",
+      f"canal='whatsapp' devuelve SOLO el registro de whatsapp de ese contacto (obtuvo {reg_whatsapp})")
+check(reg_voz is not None and reg_voz["id"] == "rec-voz",
+      f"canal='voz' devuelve SOLO el registro de voz de ese contacto (obtuvo {reg_voz})")
+check(reg_sin_filtro is not None and reg_sin_filtro["id"] == "rec-voz",
+      f"sin filtro de canal, devuelve el mas reciente sin importar el canal (obtuvo {reg_sin_filtro}) "
+      f"-- confirma que el filtro es opcional, no cambia el comportamiento viejo si no se pide")
+
+# --- registros viejos sin "canal" guardado se tratan como 'whatsapp' (compatibilidad hacia atras) ---
+_REGISTROS_SIN_CANAL = [
+    {"id": "rec-viejo", "createdAt": "2026-01-01T10:00:00Z",
+     "properties": {"contacto": "c-viejo", "conductor_nombre": "De antes de que existiera canal"}},
+]
+class _ClienteSinCanalFalso:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def post(self, *a, **k): return _RespuestaRegistrosFalsa(_REGISTROS_SIN_CANAL)
+
+gb.httpx.Client = _ClienteSinCanalFalso
+try:
+    reg_viejo = gb.buscar_registro_conductor("c-viejo", canal="whatsapp")
+    reg_viejo_voz = gb.buscar_registro_conductor("c-viejo", canal="voz")
+finally:
+    gb.httpx.Client = _httpx_original2
+
+check(reg_viejo is not None and reg_viejo["id"] == "rec-viejo",
+      f"un registro sin 'canal' guardado (de antes de que existiera el campo) cuenta como 'whatsapp' "
+      f"(obtuvo {reg_viejo})")
+check(reg_viejo_voz is None,
+      f"ese mismo registro viejo NO cuenta como 'voz' (obtuvo {reg_viejo_voz})")
+
+# --- obtener_datos_conductor (usado por el flujo de WhatsApp) pide canal='whatsapp' ---
+# (usa _obtener_datos_conductor_real, guardada al principio del archivo --
+# gb.obtener_datos_conductor ya esta monkeypatcheado con un lambda por las
+# pruebas de arriba, ver "deja el mock neutro para el resto")
+_llamadas_buscar_registro = []
+_buscar_registro_original = gb.buscar_registro_conductor
+def _buscar_registro_espia(contact_id, canal=None):
+    _llamadas_buscar_registro.append((contact_id, canal))
+    return None
+gb.buscar_registro_conductor = _buscar_registro_espia
+try:
+    _obtener_datos_conductor_real("c-cualquiera-canal")
+finally:
+    gb.buscar_registro_conductor = _buscar_registro_original
+
+check(_llamadas_buscar_registro == [("c-cualquiera-canal", "whatsapp")],
+      f"obtener_datos_conductor (usado solo por WhatsApp) filtra canal='whatsapp' al buscar "
+      f"(obtuvo {_llamadas_buscar_registro})")
 
 print("\n=== TODO OK (segupoliza) ===")

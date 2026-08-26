@@ -422,13 +422,23 @@ def actualizar_registro_cotizacion(record_id: str, propiedades: Dict[str, str]) 
         raise GHLError(f"GHL (actualizar registro) respondio {r.status_code}: {r.text[:300]}")
 
 
-def buscar_registro_conductor(contact_id: str) -> Optional[dict]:
+def buscar_registro_conductor(contact_id: str, canal: Optional[str] = None) -> Optional[dict]:
     """POST /objects/{schemaKey}/records/search -- busca los registros de
     este contactId (via el campo de texto "contacto", la unica propiedad
     "searchable" del objeto) y devuelve el mas reciente, o None si nunca
     ha cotizado. Se filtra por igualdad exacta despues de la busqueda como
     resguardo -- "query" hace busqueda de texto sobre las
-    searchableProperties, no necesariamente coincidencia exacta."""
+    searchableProperties, no necesariamente coincidencia exacta.
+
+    "canal", si se manda, filtra ADEMAS por el campo "canal" del registro
+    ("whatsapp" o "voz", ver crear_registro_cotizacion) -- necesario porque
+    un mismo contact_id puede cotizar por los dos medios, y sin este filtro
+    "el mas reciente de este contacto" podia ser una cotizacion de voz
+    aunque estemos en medio de una conversacion de WhatsApp (o al reves),
+    mezclando datos del conductor o el registro equivocado entre los dos
+    flujos. Los registros viejos que no tienen "canal" guardado (de antes
+    de que existiera ese campo) se tratan como "whatsapp" -- ese era el
+    unico canal que existia entonces."""
     body = {
         "locationId": GHL_LOCATION_ID,
         "page": 1,
@@ -443,6 +453,9 @@ def buscar_registro_conductor(contact_id: str) -> Optional[dict]:
         raise GHLError(f"GHL (buscar registros) respondio {r.status_code}: {r.text[:300]}")
     registros = r.json().get("records") or []
     propios = [reg for reg in registros if (reg.get("properties") or {}).get("contacto") == contact_id]
+    if canal:
+        propios = [reg for reg in propios
+                   if ((reg.get("properties") or {}).get("canal") or "whatsapp") == canal]
     if not propios:
         return None
     propios.sort(key=lambda reg: reg.get("createdAt") or "", reverse=True)
@@ -458,9 +471,13 @@ def obtener_datos_conductor(contact_id: str) -> Optional[dict]:
     nombre/edad/codigo_postal si los tres estan completos -- asi no se le
     vuelven a pedir si ya cotizo antes. Devuelve None si nunca ha
     cotizado, si falta cualquiera de los tres datos, o si la llamada a
-    GHL falla (se trata igual que 'primera vez', pidiendo todo de cero)."""
+    GHL falla (se trata igual que 'primera vez', pidiendo todo de cero).
+
+    Solo la usa el flujo de WhatsApp (ver _iniciar_datos_conductor), por
+    eso filtra canal="whatsapp" -- si el contacto tambien cotizo por voz,
+    ese registro no cuenta aqui (ver buscar_registro_conductor)."""
     try:
-        registro = buscar_registro_conductor(contact_id)
+        registro = buscar_registro_conductor(contact_id, canal="whatsapp")
     except Exception as e:
         print(f"[obtener-datos-conductor] fallo consultando GHL para {contact_id}: {e}")
         return None
@@ -594,8 +611,10 @@ def recibir_resultado_cotizacion(contact_id: str, resultado: dict) -> bool:
             # el proceso se reinicio (o REGISTROS_ACTIVOS se perdio por
             # cualquier otra razon) entre crear el registro y recibir el
             # callback -- se busca el mas reciente de este contacto como
-            # respaldo en vez de perder el resultado.
-            registro = buscar_registro_conductor(contact_id)
+            # respaldo en vez de perder el resultado. canal="whatsapp"
+            # para no engancharle el resultado a un registro de voz si el
+            # mismo contacto tambien cotizo por ahi mas reciente.
+            registro = buscar_registro_conductor(contact_id, canal="whatsapp")
             record_id = registro.get("id") if registro else None
         if not record_id:
             raise GHLError(f"no encontre ningun registro del Custom Object para {contact_id}")
@@ -753,7 +772,9 @@ def recibir_resultado_cotizacion_segupoliza(payload: dict) -> dict:
     guardado_ok = True
     try:
         if not record_id:
-            registro = buscar_registro_conductor(contact_id)
+            # mismo respaldo/razon que en recibir_resultado_cotizacion() de
+            # arriba -- canal="whatsapp" para no pisar un registro de voz.
+            registro = buscar_registro_conductor(contact_id, canal="whatsapp")
             record_id = registro.get("id") if registro else None
         if not record_id:
             raise GHLError(f"no encontre ningun registro del Custom Object para {contact_id}")
