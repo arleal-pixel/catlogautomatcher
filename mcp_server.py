@@ -47,6 +47,7 @@ import contextvars
 import json
 import os
 import secrets
+from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -77,38 +78,52 @@ class _BearerAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-# contextvar (no una global simple) porque varias requests pueden procesarse
+# contextvars (no globales simples) porque varias requests pueden procesarse
 # concurrentemente en el mismo proceso -- cada una necesita ver SU PROPIO
-# contact_id, no el de la ultima request que paso por el middleware.
+# contact_id/canal, no el de la ultima request que paso por el middleware.
 _contact_id_header_var: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
     "segutrenda_mcp_contact_id_header", default=None
+)
+_canal_header_var: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "segutrenda_mcp_canal_header", default=None
 )
 
 
 class _ContactIdHeaderMiddleware(BaseHTTPMiddleware):
-    """Recurso de respaldo: si GHL Voice AI no tiene forma de mandar
-    contact_id como argumento de la herramienta (dentro de "MCP Tools"), pero
-    SI lo manda como header HTTP generico (dentro de "Headers", el mismo
-    lugar donde va Authorization), lo leemos de ahi y lo dejamos disponible
-    en un contextvar -- segutrenda_cotizar_auto lo usa como fallback SOLO si
-    el argumento contact_id vino vacio. No pisa el argumento si ya viene
-    lleno -- el argumento explicito de la herramienta manda.
+    """Recurso de respaldo: si el panel de GHL (Voice AI o el Employee de
+    WhatsApp que tambien puede llamar a este MCP, ver GHL_VOICE_MCP.md) no
+    tiene forma de mandar contact_id/canal como argumento de la herramienta
+    (dentro de "MCP Tools"), pero SI los manda como headers HTTP genericos
+    (dentro de "Headers", el mismo lugar donde va Authorization), los leemos
+    de ahi y los dejamos disponibles en un contextvar cada uno --
+    segutrenda_cotizar_auto los usa como fallback SOLO si el argumento
+    correspondiente vino vacio. No pisa el argumento si ya viene lleno -- el
+    argumento explicito de la herramienta siempre manda.
 
-    Acepta tanto "contact_id" como "x-contact-id"/"contactid" (headers HTTP
-    no distinguen mayusculas/minusculas ni guiones bajos vs guiones)."""
+    El header "canal" es justo lo que permite diferenciar, sin ambiguedad,
+    si esta llamando el Employee de Voz o el de WhatsApp cuando los dos
+    tienen acceso a la MISMA herramienta MCP: se configura una vez, fijo,
+    en la config de cada Employee en GHL (no lo decide la IA en cada turno).
+
+    Acepta tanto "contact_id" como "x-contact-id"/"contactid" para el
+    contacto, y "canal"/"x-canal" para el canal (headers HTTP no distinguen
+    mayusculas/minusculas ni guiones bajos vs guiones)."""
 
     async def dispatch(self, request: Request, call_next):
-        valor = (
+        valor_contact_id = (
             request.headers.get("contact_id")
             or request.headers.get("contact-id")
             or request.headers.get("x-contact-id")
             or request.headers.get("contactid")
         )
-        token = _contact_id_header_var.set(valor)
+        valor_canal = request.headers.get("canal") or request.headers.get("x-canal")
+        token_contact_id = _contact_id_header_var.set(valor_contact_id)
+        token_canal = _canal_header_var.set(valor_canal)
         try:
             return await call_next(request)
         finally:
-            _contact_id_header_var.reset(token)
+            _contact_id_header_var.reset(token_contact_id)
+            _canal_header_var.reset(token_canal)
 
 
 GHL_TABLOTA_ID = os.environ.get("GHL_TABLOTA_ID", "default")
@@ -212,6 +227,16 @@ class CotizarAutoInput(BaseModel):
         default=None,
         description="Descripcion/version del vehiculo (opcional, solo para una nota mas legible).",
     )
+    anio: Optional[str] = Field(
+        default=None,
+        description=(
+            "Año del vehiculo -- viene en la respuesta de "
+            "segutrenda_resolver_vehiculo/segutrenda_elegir_opcion. OBLIGATORIO "
+            "en la practica cuando canal='whatsapp' (la cotizacion real de "
+            "Segupoliza lo requiere) -- opcional para canal='voz' (la "
+            "cotizacion demo no lo usa)."
+        ),
+    )
     edad_conductor: int = Field(
         ...,
         description="Edad del conductor principal que va a manejar el vehiculo.",
@@ -226,19 +251,69 @@ class CotizarAutoInput(BaseModel):
     contact_id: Optional[str] = Field(
         default=None,
         description=(
-            "El contactId de GoHighLevel del cliente en esta llamada, SOLO si "
-            "tu configuracion de Voice AI tiene forma de mandarlo (varios "
-            "paneles de GHL, a la fecha, NO la tienen -- ver GHL_VOICE_MCP.md). "
-            "Si se manda, la cotizacion queda guardada en GHL (mismo Custom "
-            "Object 'chatbotprinciap' que usa WhatsApp, con canal='voz'). NO "
-            "se intenta adivinar ni buscar por otro medio (ej. telefono) -- "
-            "asociar la cotizacion al contacto equivocado es peor que no "
-            "guardarla."
+            "El contactId de GoHighLevel del cliente en esta conversacion, SOLO "
+            "si tu configuracion de GHL tiene forma de mandarlo (varios paneles "
+            "de Voice AI, a la fecha, NO la tienen como argumento -- usa el "
+            "header 'contact_id' como respaldo, ver GHL_VOICE_MCP.md). Si se "
+            "manda, la cotizacion queda guardada en GHL (mismo Custom Object "
+            "'chatbotprinciap' que usa WhatsApp). OBLIGATORIO en la practica "
+            "cuando canal='whatsapp' -- sin contact_id no hay a quien mandarle "
+            "el resultado real de Segupoliza. NO se intenta adivinar ni buscar "
+            "por otro medio (ej. telefono) -- asociar la cotizacion al contacto "
+            "equivocado es peor que no guardarla."
         ),
     )
     nombre_conductor: Optional[str] = Field(
         default=None,
-        description="Nombre del conductor (opcional, si el agente ya lo tiene de la llamada) -- solo para guardarlo junto con la cotizacion en GHL.",
+        description=(
+            "Nombre completo del conductor. Opcional para canal='voz' (solo "
+            "para guardarlo junto con la cotizacion demo). OBLIGATORIO en la "
+            "practica para canal='whatsapp' -- Segupoliza lo necesita para "
+            "Name/apellidos (ver segupoliza_client.dividir_nombre)."
+        ),
+    )
+    correo_conductor: Optional[str] = Field(
+        default=None,
+        description=(
+            "Correo electronico del conductor. Solo se usa (y es OBLIGATORIO) "
+            "cuando canal='whatsapp' -- Segupoliza lo requiere para la "
+            "cotizacion real. Se ignora si canal='voz'."
+        ),
+    )
+    genero_conductor: Optional[str] = Field(
+        default=None,
+        description=(
+            "'M' o 'F' si el agente ya lo sabe. Opcional siempre -- si no se "
+            "manda, se infiere del nombre (gender-guesser, con reglas de "
+            "respaldo, ver segupoliza_client.py); solo aplica para "
+            "canal='whatsapp' (la cotizacion demo de voz no lo usa)."
+        ),
+    )
+    telefono_conductor: Optional[str] = Field(
+        default=None,
+        description=(
+            "Telefono del conductor en formato que incluya el codigo de pais "
+            "si se tiene (ej. '+523330079224'). Solo se usa para "
+            "canal='whatsapp' -- si no se manda, se usa el telefono que ya "
+            "haya quedado registrado para ese contact_id (ver TELEFONOS en "
+            "ghl_bridge.py); si no hay ninguno, se manda vacio a Segupoliza."
+        ),
+    )
+    canal: Optional[str] = Field(
+        default=None,
+        description=(
+            "'voz' o 'whatsapp' -- de que Employee/canal viene esta llamada. "
+            "NO lo decidas tu como IA en cada turno: normalmente esto lo fija "
+            "el administrador una sola vez en la configuracion de headers de "
+            "cada Employee en GHL (header 'canal', ver "
+            "_ContactIdHeaderMiddleware en mcp_server.py) -- si no llega ni "
+            "como argumento ni como header, se asume 'voz' (comportamiento "
+            "de siempre, cotizacion DEMO instantanea). Con canal='whatsapp', "
+            "en vez de un precio demo instantaneo, se dispara la cotizacion "
+            "REAL con Segupoliza (asincrona -- el resultado le llega al "
+            "cliente por WhatsApp, no en esta misma respuesta) -- requiere "
+            "contact_id, nombre_conductor, correo_conductor y anio."
+        ),
     )
 
 
@@ -257,6 +332,7 @@ def _resultado_a_dict(resultado) -> dict:
             "clave": resultado.clave,
             "marca": resultado.marca,
             "descripcion": resultado.descripcion,
+            "anio": resultado.anio,
         })
     elif resultado.estado == "pregunta":
         base["pregunta"] = resultado.pregunta.texto if resultado.pregunta else None
@@ -405,10 +481,97 @@ async def segutrenda_elegir_opcion(params: ElegirOpcionInput) -> str:
     return json.dumps(_resultado_a_dict(resultado), ensure_ascii=False)
 
 
+def _cotizar_auto_whatsapp_real(params: "CotizarAutoInput", contact_id: str, vehiculo: dict, conductor_base: dict) -> str:
+    """canal='whatsapp': en vez del precio DEMO instantaneo (pensado para
+    que Voice AI lo lea en la llamada), dispara la cotizacion REAL con
+    Segupoliza -- exactamente el mismo mecanismo que usa ghl_bridge.py para
+    el bot de WhatsApp (crear_registro_cotizacion + enviar_a_cotizar). El
+    resultado real le llega al cliente DESPUES por WhatsApp (via el webhook
+    de Segupoliza, sea directo a nuestro backend o directo a GHL segun como
+    este configurado -- ver COTIZADOR_AUTO_CONTRATO.md), NO en esta misma
+    respuesta -- dile al cliente que estas calculando su cotizacion.
+
+    Deja al contacto en fase 'esperando_cotizacion' en CONVERSACIONES, IGUAL
+    que hace ghl_bridge._finalizar_datos_conductor() -- asi, si el cliente
+    escribe algo mas por WhatsApp mientras tanto (a este bot custom, no a
+    este Employee), procesar_mensaje_whatsapp() no lo confunde con una
+    descripcion de vehiculo nueva."""
+    faltantes = [
+        campo for campo, valor in (
+            ("contact_id", contact_id),
+            ("nombre_conductor", params.nombre_conductor),
+            ("correo_conductor", params.correo_conductor),
+            ("anio", params.anio),
+        ) if not valor
+    ]
+    if faltantes:
+        return json.dumps(
+            {
+                "estado": "faltan_datos",
+                "campos_faltantes": faltantes,
+                "mensaje": (
+                    "Para cotizar de verdad por WhatsApp faltan estos datos: "
+                    + ", ".join(faltantes) + ". Pideselos al cliente y vuelve a "
+                    "llamar a esta herramienta con todo completo -- NO inventes "
+                    "ninguno de estos valores, ni cotices con canal='voz' como "
+                    "sustituto (esa es una cotizacion DEMO, no una real)."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    ghl = _ghl()
+    conductor = dict(conductor_base)
+    conductor["correo"] = params.correo_conductor
+    conductor["genero"] = params.genero_conductor
+    conductor["telefono"] = params.telefono_conductor or ghl.TELEFONOS.get(contact_id) or ""
+
+    record_id = None
+    try:
+        record_id = ghl.crear_registro_cotizacion(contact_id, vehiculo, conductor, canal="whatsapp")
+        if record_id:
+            ghl.REGISTROS_ACTIVOS[contact_id] = record_id
+    except Exception as e:
+        print(f"[segutrenda_mcp] fallo guardando registro whatsapp-real en GHL para {contact_id}: {e}")
+
+    enviado = False
+    try:
+        enviado = ghl.enviar_a_cotizar(contact_id, vehiculo, conductor)
+    except Exception as e:
+        print(f"[segutrenda_mcp] fallo disparando cotizacion real (canal=whatsapp) para {contact_id}: {e}")
+
+    ghl.CONVERSACIONES[contact_id] = {
+        "fase": "esperando_cotizacion",
+        "vehiculo": vehiculo,
+        "datos": conductor,
+        "actualizado": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if enviado:
+        print(f"[segutrenda_mcp] cotizacion REAL (canal=whatsapp) disparada para {contact_id}, record_id={record_id}")
+        mensaje = (
+            "La solicitud de cotizacion real ya se envio -- el cliente va a "
+            "recibir el resultado por WhatsApp en unos minutos, NO lo esperes en "
+            "esta respuesta. Dile que estas calculando su cotizacion con las "
+            "aseguradoras y que en breve le llega por WhatsApp."
+        )
+    else:
+        mensaje = (
+            "No se pudo disparar la cotizacion real (revisa los logs del "
+            "servidor, busca '[segutrenda_mcp]') -- dile al cliente que hubo un "
+            "problema tecnico y que un asesor le va a confirmar."
+        )
+
+    return json.dumps(
+        {"estado": "en_proceso" if enviado else "error_envio", "mensaje": mensaje, "record_id": record_id},
+        ensure_ascii=False,
+    )
+
+
 @mcp.tool(
     name="segutrenda_cotizar_auto",
     annotations={
-        "title": "Cotizar seguro de auto (DEMO)",
+        "title": "Cotizar seguro de auto",
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": True,
@@ -417,60 +580,73 @@ async def segutrenda_elegir_opcion(params: ElegirOpcionInput) -> str:
 )
 async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
     """Genera una cotizacion de seguro de auto para un vehiculo YA RESUELTO
-    (con clave), dado la edad y codigo postal del conductor.
+    (con clave), dado la edad y codigo postal del conductor. El
+    comportamiento depende del campo 'canal' (ver CotizarAutoInput) --
+    normalmente lo fija el administrador por Employee en GHL, no la IA:
 
-    IMPORTANTE: esto es una cotizacion DEMO (precio inventado pero
-    consistente para el mismo vehiculo+edad), porque la API real del
-    asegurador todavia no existe -- ver COTIZADOR_AUTO_CONTRATO.md. Dile
-    siempre al cliente que es una cotizacion preliminar/de prueba, no el
-    precio final.
+    - canal='voz' (default si no llega ninguno -- comportamiento de
+      siempre): cotizacion DEMO instantanea (precio inventado pero
+      consistente para el mismo vehiculo+edad), porque una llamada de voz
+      necesita un numero YA para leerselo al cliente y la API real de
+      Segupoliza es asincrona. Dile siempre al cliente que es una
+      cotizacion preliminar/de prueba, no el precio final.
+    - canal='whatsapp': cotizacion REAL con Segupoliza (misma via que usa
+      el bot de WhatsApp en ghl_bridge.py) -- NO es instantanea, el
+      resultado le llega al cliente por WhatsApp despues. Requiere
+      contact_id, nombre_conductor, correo_conductor y anio completos; si
+      falta alguno, la herramienta responde estado='faltan_datos' con la
+      lista exacta -- pidele esos datos al cliente y vuelve a llamarla, no
+      inventes valores ni cotices con canal='voz' como atajo (esa SI es
+      demo).
 
     No llames a esta herramienta hasta tener una 'clave' de vehiculo -- usa
     primero segutrenda_resolver_vehiculo (y segutrenda_elegir_opcion si hace
-    falta) para conseguirla.
+    falta) para conseguirla (tambien te da 'anio', que necesitas para
+    canal='whatsapp').
 
-    Esta cotizacion tambien se guarda en GHL -- mismo Custom Object
-    'chatbotprinciap' que usa el flujo de WhatsApp, con el campo canal='voz'
-    para distinguirlas -- pero SOLO si 'contact_id' viene lleno con un valor
-    real (varios paneles de Voice AI de GHL, a la fecha, no tienen forma de
-    mandarlo -- ver GHL_VOICE_MCP.md para el estado actual). A proposito NO
-    se intenta adivinar el contacto por ningun otro medio (ej. telefono) --
+    Con canal='voz', esta cotizacion tambien se guarda en GHL -- mismo
+    Custom Object 'chatbotprinciap' que usa el flujo de WhatsApp, con el
+    campo canal='voz' para distinguirlas -- pero SOLO si 'contact_id' viene
+    lleno con un valor real (varios paneles de Voice AI de GHL, a la fecha,
+    no tienen forma de mandarlo como argumento -- usa el header
+    'contact_id' como respaldo, ver GHL_VOICE_MCP.md). A proposito NO se
+    intenta adivinar el contacto por ningun otro medio (ej. telefono) --
     ligar la cotizacion al contacto EQUIVOCADO es peor que no guardarla.
 
     Args:
         params (CotizarAutoInput): clave del vehiculo, edad y codigo postal
-            del conductor, opcionalmente marca/descripcion para que la
-            respuesta salga mas legible, y opcionalmente contact_id/
-            nombre_conductor para guardar la cotizacion en GHL.
+            del conductor; opcionalmente marca/descripcion/anio para que la
+            respuesta salga mas legible (anio es obligatorio en la practica
+            para canal='whatsapp'); contact_id/nombre_conductor para
+            guardar la cotizacion en GHL (tambien obligatorios en la
+            practica para canal='whatsapp', junto con correo_conductor); y
+            'canal' ('voz' o 'whatsapp', normalmente fijo por Employee, ver
+            arriba).
 
     Returns:
-        str: JSON con "precio" (float), "moneda", "cobertura",
-        "vigencia_dias", "demo" (true) y "nota" aclarando que es una
-        cotizacion de prueba.
+        str: JSON. Con canal='voz' (o sin canal): "precio" (float),
+        "moneda", "cobertura", "vigencia_dias", "demo" (true) y "nota"
+        aclarando que es una cotizacion de prueba. Con canal='whatsapp':
+        "estado" ('en_proceso', 'error_envio' o 'faltan_datos') y "mensaje"
+        explicando que decirle al cliente -- NUNCA trae un precio en esta
+        misma respuesta, el precio real llega despues por WhatsApp.
 
     Error Handling:
-        - Esta herramienta no falla por datos de negocio (siempre calcula
-          algo) -- solo puede fallar si Pydantic rechaza la entrada (ej.
-          codigo postal que no son 5 digitos, edad fuera de 16-99).
+        - canal='voz' no falla por datos de negocio (siempre calcula algo)
+          -- solo puede fallar si Pydantic rechaza la entrada (ej. codigo
+          postal que no son 5 digitos, edad fuera de 16-99).
+        - canal='whatsapp' con datos incompletos responde
+          estado='faltan_datos' (no es un error tecnico, solo pide mas
+          informacion antes de intentar cotizar).
         - Si el guardado en GHL falla (credenciales, red, campo 'canal' que
-          todavia no existe en el objeto), NO se rompe la cotizacion -- el
-          cliente igual recibe su precio, el error solo queda en el log del
-          servidor (mismo patron defensivo que usa ghl_bridge.py con
-          WhatsApp).
+          todavia no existe en el objeto), NO se rompe la respuesta al
+          cliente -- el error solo queda en el log del servidor (mismo
+          patron defensivo que usa ghl_bridge.py con WhatsApp).
     """
-    precio_demo = _precio_demo_fn()
-    vehiculo = {"clave": params.clave, "marca": params.marca, "descripcion": params.descripcion}
-    conductor = {
-        "nombre": params.nombre_conductor,
-        "edad": params.edad_conductor,
-        "codigo_postal": params.codigo_postal,
-    }
-    resultado = precio_demo(vehiculo, conductor)
-
     # Si el argumento contact_id vino vacio, checa si llego como header HTTP
-    # (respaldo para cuando la config de Voice AI no deja mapear contact_id
-    # como argumento de la herramienta -- ver _ContactIdHeaderMiddleware).
-    # El argumento explicito SIEMPRE manda si vino lleno.
+    # (respaldo para cuando la config de GHL no deja mapear contact_id como
+    # argumento de la herramienta -- ver _ContactIdHeaderMiddleware). El
+    # argumento explicito SIEMPRE manda si vino lleno.
     contact_id = params.contact_id or _contact_id_header_var.get()
     origen_contact_id = "argumento" if params.contact_id else ("header" if contact_id else None)
 
@@ -483,7 +659,7 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
     # tratamos igual que si no hubiera llegado nada.
     if contact_id and "{{" in contact_id and "}}" in contact_id:
         print(f"[segutrenda_mcp] ADVERTENCIA: contact_id llego como texto literal sin resolver ('{contact_id}', via {origen_contact_id}) "
-              "-- tu panel de Voice AI no esta sustituyendo esa variable ahi. No se guarda en GHL con ese valor. "
+              "-- tu panel de GHL no esta sustituyendo esa variable ahi. No se guarda en GHL con ese valor. "
               "Configura contact_id como parametro de la herramienta (seccion 'MCP Tools', no 'Headers') -- ver GHL_VOICE_MCP.md.")
         contact_id = None
         origen_contact_id = None
@@ -497,6 +673,33 @@ async def segutrenda_cotizar_auto(params: CotizarAutoInput) -> str:
     # momento se quiere retomar esa idea CON confirmacion explicita del
     # cliente antes de usarla (ej. leerle el nombre encontrado en voz alta y
     # que el diga "si, soy yo").
+
+    # canal: NO lo decide la IA en cada turno -- normalmente lo fija el
+    # administrador, fijo, por Employee (header 'canal' en la config de GHL
+    # de cada uno, ver _ContactIdHeaderMiddleware). El argumento explicito
+    # de la herramienta manda si vino lleno; cualquier valor no reconocido
+    # se trata como 'voz' (el comportamiento seguro/de siempre -- nunca se
+    # asume 'whatsapp', que dispara una cotizacion real, por un valor raro).
+    canal_crudo = params.canal or _canal_header_var.get()
+    origen_canal = "argumento" if params.canal else ("header" if _canal_header_var.get() else "default")
+    canal = (canal_crudo or "voz").strip().lower()
+    if canal not in ("voz", "whatsapp"):
+        print(f"[segutrenda_mcp] ADVERTENCIA: canal={canal_crudo!r} no reconocido (via {origen_canal}) -- se trata como 'voz'.")
+        canal = "voz"
+
+    vehiculo = {"clave": params.clave, "marca": params.marca, "descripcion": params.descripcion, "anio": params.anio}
+    conductor = {
+        "nombre": params.nombre_conductor,
+        "edad": params.edad_conductor,
+        "codigo_postal": params.codigo_postal,
+    }
+
+    if canal == "whatsapp":
+        return _cotizar_auto_whatsapp_real(params, contact_id, vehiculo, conductor)
+
+    # --- canal='voz' (default): cotizacion DEMO instantanea, sin cambios de comportamiento ---
+    precio_demo = _precio_demo_fn()
+    resultado = precio_demo(vehiculo, conductor)
 
     if contact_id:
         try:

@@ -6,13 +6,23 @@ cotizador de auto como herramientas que la IA puede llamar directo durante
 una llamada -- sin pasar por el workflow de tags/Inactive/Active que usa el
 puente de WhatsApp (`ghl_bridge.py`).
 
-**Importante:** a la fecha (agosto 2026), "conectar a un servidor MCP" como
-Custom Action solo esta confirmado/documentado para **Voice AI** (bot de
-llamadas telefonicas). Para **Conversation AI** (el bot de chat/WhatsApp que
-ya tenemos en produccion) esa capacidad todavia esta como solicitud de
-feature pendiente en el foro de HighLevel -- no reemplaza `ghl_bridge.py`
-todavia. Este servidor es para dejarlo listo y probarlo con Voice AI (o con
-MCP Inspector) mientras tanto.
+**Actualizado:** cuando se escribió el párrafo de abajo (agosto 2026),
+"conectar a un servidor MCP" como Custom Action solo estaba
+confirmado/documentado para **Voice AI**. Desde entonces se confirmó en una
+cuenta real que **Conversation AI** (el Employee de WhatsApp) TAMBIÉN puede
+tener acceso a este mismo servidor MCP -- y de hecho puede tener la MISMA
+herramienta `segutrenda_cotizar_auto` habilitada que el Employee de Voz. Eso
+NO reemplaza a `ghl_bridge.py` (que sigue siendo el flujo principal y más
+completo de WhatsApp), pero si tu Employee de WhatsApp SÍ tiene esta
+herramienta habilitada, es importante configurar el header `canal` (ver
+sección "Un mismo servidor MCP para Voz y WhatsApp" más abajo) para que no
+te mande cotizaciones DEMO por WhatsApp por accidente, y para que no se
+mezclen los registros y el historial de datos del conductor de los dos
+canales (ver `ghl_bridge.buscar_registro_conductor`).
+
+*(Nota histórica, ya no aplica tal cual: cuando esto se escribió,
+Conversation AI todavía no tenía esta capacidad confirmada -- se dejaba
+este servidor listo para probarlo solo con Voice AI o MCP Inspector.)*
 
 ## Qué expone
 
@@ -23,7 +33,7 @@ WhatsApp (no hay un motor de vehiculos nuevo):
 |---|---|
 | `segutrenda_resolver_vehiculo` | Identifica marca/modelo/año/version a partir de una descripcion en lenguaje natural (ej. "Nissan Sentra 2019"). Si hace falta mas info, devuelve una pregunta + `session_id`. |
 | `segutrenda_elegir_opcion` | Continua la resolucion con la respuesta del cliente (usa el `session_id` de la llamada anterior), hasta llegar a `"estado": "resuelto"`. |
-| `segutrenda_cotizar_auto` | Genera una cotizacion **DEMO** (precio inventado pero consistente) dado un vehiculo ya resuelto + edad + código postal del conductor. La API real del asegurador todavia no existe -- ver `COTIZADOR_AUTO_CONTRATO.md`. Si recibe `contact_id`, además guarda la cotización en GHL (ver abajo). |
+| `segutrenda_cotizar_auto` | Con `canal="voz"` (o sin `canal`): genera una cotizacion **DEMO** (precio inventado pero consistente) dado un vehiculo ya resuelto + edad + código postal del conductor -- necesario porque una llamada necesita un número YA para leérselo al cliente. Con `canal="whatsapp"`: dispara la cotización **REAL** con Segupoliza (asíncrona, el resultado llega después por WhatsApp) -- ver "Un mismo servidor MCP para Voz y WhatsApp" más abajo. Si recibe `contact_id`, además guarda la cotización en GHL (ver abajo). |
 
 ## Guardar las cotizaciones de voz en GHL
 
@@ -82,6 +92,66 @@ el canal), hace falta:
    cualquier motivo (credenciales, red, el campo `canal` todavía no existe,
    no se encontró el contacto), el cliente de todas formas recibe su
    cotización -- el error solo queda en el log del servidor.
+
+## Un mismo servidor MCP para Voz y WhatsApp
+
+**Caso real confirmado:** el mismo Employee/servidor MCP puede quedar
+habilitado tanto para el agente de Voz como para el agente de WhatsApp en
+GHL. Sin diferenciarlos, esto causaba dos problemas al mismo tiempo cuando
+un cliente cotizaba por WhatsApp y el Employee de WhatsApp decidía usar
+`segutrenda_cotizar_auto` por su cuenta (en paralelo al bot custom de
+`ghl_bridge.py`):
+
+1. El cliente recibía un **precio DEMO** (inventado) por WhatsApp, porque la
+   herramienta asumía que SIEMPRE es una llamada de voz y usaba el precio
+   demo instantáneo -- nunca la cotización real.
+2. El registro quedaba guardado con `canal="voz"` aunque en realidad vino de
+   un chat de WhatsApp, mezclando el historial de los dos canales para ese
+   contacto (ver `ghl_bridge.buscar_registro_conductor`).
+
+**La solución es un campo `canal` que diferencia las dos llamadas -- pero
+NO lo decide la IA en cada turno**, se configura una sola vez, fijo, en la
+configuración de cada Employee en GHL:
+
+- **Employee de Voz:** no hace falta tocar nada -- si no llega ningún
+  `canal`, se usa `"voz"` por default (comportamiento de siempre, cotización
+  DEMO instantánea).
+- **Employee de WhatsApp:** en la configuración de ese Employee, en la
+  sección "Headers" de la conexión al MCP (el mismo lugar donde ya
+  configuraste `Authorization` y, si aplica, `contact_id`), agrega un header
+  fijo:
+  ```
+  canal: whatsapp
+  ```
+  Con eso, cada vez que ese Employee llame a `segutrenda_cotizar_auto`, el
+  servidor detecta `canal="whatsapp"` (vía `_canal_header_var`, mismo
+  mecanismo que `_contact_id_header_var`) y en vez de un precio demo:
+  1. Valida que tenga `contact_id`, `nombre_conductor`, `correo_conductor` y
+     `anio` completos -- si falta alguno, responde
+     `"estado": "faltan_datos"` con la lista exacta, para que el Employee se
+     los pida al cliente antes de reintentar (nunca inventa un valor, y
+     nunca cotiza con el precio demo como atajo).
+  2. Guarda el registro en `chatbotprinciap` con `canal="whatsapp"` (no
+     `"voz"`) -- mismo historial que el bot de `ghl_bridge.py`, correctamente
+     etiquetado.
+  3. Dispara la cotización REAL con Segupoliza (`ghl_bridge.enviar_a_cotizar`
+     -- la MISMA función que usa el bot de WhatsApp) -- el resultado le llega
+     al cliente por WhatsApp después, no en la respuesta de esta herramienta.
+  4. Deja al contacto en fase `esperando_cotizacion` (mismo estado interno
+     que usa `ghl_bridge.procesar_mensaje_whatsapp`) -- así, si el cliente le
+     escribe algo más al bot custom de WhatsApp mientras tanto, no lo
+     confunde con una descripción de vehículo nueva.
+
+Si tu panel de GHL tampoco te deja fijar headers por Employee (mismo tipo de
+limitación que ya se documentó arriba para `contact_id`), la alternativa es
+que el propio Employee de WhatsApp pase `canal="whatsapp"` como argumento de
+la herramienta en cada llamada -- instrúyelo explícitamente para eso en su
+prompt/instrucciones, ya que la IA sí puede decidir el valor de un argumento
+normal (a diferencia de un header fijo).
+
+**Por seguridad, cualquier valor de `canal` que no sea exactamente `"voz"` o
+`"whatsapp"` se trata como `"voz"`** -- nunca se asume `"whatsapp"` (que
+dispara una solicitud real) por un valor raro o mal escrito.
 
 ## Probarlo localmente (antes de desplegar)
 

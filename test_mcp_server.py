@@ -158,4 +158,153 @@ d8 = json.loads(salida8)
 check("precio" in d8, "sin contact_id, la cotizacion se calcula igual (y no truena por el mock de arriba)")
 check(len(llamadas) == 0, "sin contact_id, no se guarda nada en GHL (confirma que no se intento adivinar por telefono)")
 
+# --------------------------------------------------------------------------
+# canal='whatsapp': cotizacion REAL (via ghl_bridge.enviar_a_cotizar), no la
+# demo -- el mismo Employee/servidor MCP puede atender Voice AI (canal='voz')
+# y al Employee de WhatsApp (canal='whatsapp') sin mezclar sus cotizaciones.
+# --------------------------------------------------------------------------
+ghl.crear_registro_cotizacion = _mock_crear_registro_cotizacion
+ghl.buscar_contact_id_por_telefono = lambda telefono: None  # deshace el mock que truena, ya no hace falta
+ghl.CONVERSACIONES.clear()
+ghl.REGISTROS_ACTIVOS.clear()
+ghl.TELEFONOS.clear()
+
+_llamadas_enviar_a_cotizar = []
+def _mock_enviar_a_cotizar_ok(contact_id, vehiculo, datos_conductor):
+    _llamadas_enviar_a_cotizar.append({"contact_id": contact_id, "vehiculo": vehiculo, "datos_conductor": datos_conductor})
+    return True
+ghl.enviar_a_cotizar = _mock_enviar_a_cotizar_ok
+
+# --- canal='whatsapp' con todos los datos completos -> cotizacion REAL, no demo ---
+llamadas.clear()
+_llamadas_enviar_a_cotizar.clear()
+params_wa = srv.CotizarAutoInput(
+    clave="01420201624",
+    marca="VW",
+    descripcion="Jetta Comfortline Automatico",
+    anio="2021",
+    edad_conductor=35,
+    codigo_postal="01000",
+    contact_id="ghl-wa-real-1",
+    nombre_conductor="Ana Ejemplo",
+    correo_conductor="ana@ejemplo.com",
+    genero_conductor="F",
+    telefono_conductor="+523330079224",
+    canal="whatsapp",
+)
+salida_wa = run(srv.segutrenda_cotizar_auto(params_wa))
+d_wa = json.loads(salida_wa)
+check(d_wa.get("estado") == "en_proceso" and "precio" not in d_wa,
+      f"canal='whatsapp' NO devuelve un precio en la misma respuesta -- es async (obtuvo {d_wa})")
+check(len(llamadas) == 1 and llamadas[0]["canal"] == "whatsapp" and llamadas[0]["contact_id"] == "ghl-wa-real-1",
+      f"se creo el registro en GHL con canal='whatsapp', no 'voz' (obtuvo {llamadas})")
+check(llamadas[0]["resultado_cotizacion"] is None,
+      "el registro whatsapp-real se crea SIN resultado (llega despues, async) -- a diferencia de voz")
+check(len(_llamadas_enviar_a_cotizar) == 1 and _llamadas_enviar_a_cotizar[0]["contact_id"] == "ghl-wa-real-1",
+      f"se disparo enviar_a_cotizar (la cotizacion REAL) para ese contacto (obtuvo {_llamadas_enviar_a_cotizar})")
+check(_llamadas_enviar_a_cotizar[0]["datos_conductor"]["correo"] == "ana@ejemplo.com",
+      "el correo del conductor se paso a la cotizacion real")
+check(ghl.REGISTROS_ACTIVOS.get("ghl-wa-real-1") == "rec-123", "se guardo el record_id en REGISTROS_ACTIVOS")
+check(ghl.CONVERSACIONES.get("ghl-wa-real-1", {}).get("fase") == "esperando_cotizacion",
+      f"el contacto queda en fase 'esperando_cotizacion' -- asi el bot de WhatsApp no lo confunde con un "
+      f"vehiculo nuevo si el cliente escribe algo mas mientras tanto (obtuvo {ghl.CONVERSACIONES.get('ghl-wa-real-1')})")
+
+# --- canal='whatsapp' con datos incompletos -> pide los que faltan, NO cotiza con nada inventado ---
+llamadas.clear()
+_llamadas_enviar_a_cotizar.clear()
+ghl.CONVERSACIONES.clear()
+params_wa_incompleto = srv.CotizarAutoInput(
+    clave="01420201624",
+    edad_conductor=35,
+    codigo_postal="01000",
+    canal="whatsapp",
+    # sin contact_id, sin nombre_conductor, sin correo_conductor, sin anio
+)
+salida_wa_incompleto = run(srv.segutrenda_cotizar_auto(params_wa_incompleto))
+d_wa_incompleto = json.loads(salida_wa_incompleto)
+check(d_wa_incompleto.get("estado") == "faltan_datos", f"canal='whatsapp' sin datos completos -> 'faltan_datos' (obtuvo {d_wa_incompleto})")
+check(set(d_wa_incompleto.get("campos_faltantes", [])) == {"contact_id", "nombre_conductor", "correo_conductor", "anio"},
+      f"lista exactamente los campos que faltan (obtuvo {d_wa_incompleto})")
+check(len(llamadas) == 0 and len(_llamadas_enviar_a_cotizar) == 0,
+      "con datos incompletos, NO se crea registro ni se dispara ninguna cotizacion")
+
+# --- telefono_conductor: si no se manda, usa el de TELEFONOS[contact_id] ---
+llamadas.clear()
+_llamadas_enviar_a_cotizar.clear()
+ghl.CONVERSACIONES.clear()
+ghl.TELEFONOS["ghl-wa-real-2"] = "8118031414"
+params_wa_sin_telefono = srv.CotizarAutoInput(
+    clave="01420201624",
+    anio="2020",
+    edad_conductor=28,
+    codigo_postal="44100",
+    contact_id="ghl-wa-real-2",
+    nombre_conductor="Roberto Diaz",
+    correo_conductor="roberto@ejemplo.com",
+    canal="whatsapp",
+)
+run(srv.segutrenda_cotizar_auto(params_wa_sin_telefono))
+check(_llamadas_enviar_a_cotizar[0]["datos_conductor"]["telefono"] == "8118031414",
+      f"sin telefono_conductor explicito, usa el que ya estaba en TELEFONOS para ese contacto "
+      f"(obtuvo {_llamadas_enviar_a_cotizar[0]['datos_conductor']})")
+ghl.TELEFONOS.clear()
+
+# --- el header 'canal' funciona igual que el argumento (mismo patron que contact_id) ---
+llamadas.clear()
+_llamadas_enviar_a_cotizar.clear()
+ghl.CONVERSACIONES.clear()
+token_canal = srv._canal_header_var.set("whatsapp")
+try:
+    params_wa_header = srv.CotizarAutoInput(
+        clave="01420201624", anio="2019", edad_conductor=30, codigo_postal="01000",
+        contact_id="ghl-wa-header", nombre_conductor="Luis Prueba", correo_conductor="luis@ejemplo.com",
+    )
+    salida_wa_header = run(srv.segutrenda_cotizar_auto(params_wa_header))
+finally:
+    srv._canal_header_var.reset(token_canal)
+check(json.loads(salida_wa_header).get("estado") == "en_proceso",
+      f"canal='whatsapp' llegado por header (sin argumento) tambien dispara la cotizacion real "
+      f"(obtuvo {salida_wa_header})")
+
+# --- el argumento explicito de canal manda sobre el header ---
+llamadas.clear()
+_llamadas_enviar_a_cotizar.clear()
+ghl.CONVERSACIONES.clear()
+token_canal2 = srv._canal_header_var.set("whatsapp")
+try:
+    params_voz_gana = srv.CotizarAutoInput(
+        clave="01420201624", edad_conductor=30, codigo_postal="01000", canal="voz",
+    )
+    salida_voz_gana = run(srv.segutrenda_cotizar_auto(params_voz_gana))
+finally:
+    srv._canal_header_var.reset(token_canal2)
+check("precio" in json.loads(salida_voz_gana),
+      f"canal='voz' como argumento le gana al header 'whatsapp' (obtuvo {salida_voz_gana})")
+
+# --- un canal no reconocido se trata como 'voz' (nunca se asume 'whatsapp' -- dispara una cotizacion real) ---
+llamadas.clear()
+_llamadas_enviar_a_cotizar.clear()
+params_canal_raro = srv.CotizarAutoInput(clave="01420201624", edad_conductor=30, codigo_postal="01000", canal="telefono-fijo")
+salida_canal_raro = run(srv.segutrenda_cotizar_auto(params_canal_raro))
+check("precio" in json.loads(salida_canal_raro) and len(_llamadas_enviar_a_cotizar) == 0,
+      f"un valor de canal no reconocido se trata como 'voz', por seguridad (obtuvo {salida_canal_raro})")
+
+# --- si enviar_a_cotizar falla, no truena -- responde estado='error_envio' ---
+def _mock_enviar_a_cotizar_falla(*a, **kw):
+    raise ghl.GHLError("simulado: fallo el envio")
+ghl.enviar_a_cotizar = _mock_enviar_a_cotizar_falla
+ghl.CONVERSACIONES.clear()
+params_wa_falla = srv.CotizarAutoInput(
+    clave="01420201624", anio="2021", edad_conductor=30, codigo_postal="01000",
+    contact_id="ghl-wa-falla", nombre_conductor="Test Falla", correo_conductor="falla@ejemplo.com",
+    canal="whatsapp",
+)
+salida_wa_falla = run(srv.segutrenda_cotizar_auto(params_wa_falla))
+d_wa_falla = json.loads(salida_wa_falla)
+check(d_wa_falla.get("estado") == "error_envio", f"si enviar_a_cotizar falla, responde 'error_envio' sin tronar (obtuvo {d_wa_falla})")
+
+ghl.CONVERSACIONES.clear()
+ghl.REGISTROS_ACTIVOS.clear()
+ghl.TELEFONOS.clear()
+
 print("\nTodas las pruebas de mcp_server.py pasaron.")
