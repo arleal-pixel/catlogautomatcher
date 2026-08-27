@@ -497,15 +497,17 @@ check(len(resultado_polizas) == 1 and resultado_polizas[0]["name"] == "HONDA CR-
       and resultado_polizas[0].get("_etapa_nombre") == "Oportunidad Ganada",
       f"la poliza activa se lista con su nombre y etapa (obtuvo {resultado_polizas})")
 
-# --- regresion: los query params de /opportunities/search son camelCase,
-# CONFIRMADO contra la doc oficial de GHL -- bug real detectado en vivo
-# donde se mandaban en snake_case y GHL simplemente los ignoraba (200 OK,
-# pero la busqueda nunca encontraba nada). ---
-check(set(_params_capturados[0].keys()) == {"locationId", "pipelineId", "contactId", "status"},
-      f"/opportunities/search se llama con los 4 params en camelCase, no snake_case "
+# --- regresion: los query params de /opportunities/search son snake_case,
+# CONFIRMADO EN VIVO contra la respuesta real de GHL -- la doc oficial dice
+# camelCase, pero para esta cuenta el servidor devolvio 422 con
+# "property locationId should not exist" + "location_id must be a string"
+# cuando se probo camelCase. Se revirtio a snake_case confiando en la
+# respuesta real del servidor por encima de la doc. ---
+check(set(_params_capturados[0].keys()) == {"location_id", "pipeline_id", "contact_id", "status"},
+      f"/opportunities/search se llama con los 4 params en snake_case, no camelCase "
       f"(obtuvo {_params_capturados[0]})")
-check(_params_capturados[0]["contactId"] == "c-poliza", "contactId (camelCase) lleva el contact_id correcto")
-check(_params_capturados[0]["pipelineId"] == "pipeline-fake", "pipelineId (camelCase) lleva el pipeline correcto")
+check(_params_capturados[0]["contact_id"] == "c-poliza", "contact_id (snake_case) lleva el contact_id correcto")
+check(_params_capturados[0]["pipeline_id"] == "pipeline-fake", "pipeline_id (snake_case) lleva el pipeline correcto")
 
 # --- resguardo: GHL_PIPELINE_COTIZACIONES_AUTOS_ID con espacios (caso real
 # -- alguien puso el NOMBRE del pipeline en vez de su ID) no truena, solo
@@ -521,7 +523,7 @@ try:
 finally:
     gb.httpx.Client = _httpx_original
     gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
-check(_params_capturados and _params_capturados[0]["pipelineId"] == "Cotizaciones autos Segupoliza",
+check(_params_capturados and _params_capturados[0]["pipeline_id"] == "Cotizaciones autos Segupoliza",
       f"con GHL_PIPELINE_COTIZACIONES_AUTOS_ID mal configurado (nombre en vez de id), NO truena -- solo "
       f"advierte y manda ese valor tal cual (obtuvo params={_params_capturados})")
 

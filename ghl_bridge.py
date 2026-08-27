@@ -309,22 +309,24 @@ def listar_cotizaciones_abiertas(contact_id: str) -> List[dict]:
     de este lado, GHL/su workflow es quien administra ese pipeline cuando
     Segupoliza le manda el resultado real directo a GHL.
 
-    IMPORTANTE -- filtro doble, a propósito: se manda `contactId` (camelCase,
-    CONFIRMADO contra la documentación oficial de GHL --
-    https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity)
-    como query param, para que GHL haga el filtro de su lado, más barato,
-    PERO ADEMÁS se vuelve a filtrar la respuesta aquí, comparando
+    IMPORTANTE -- filtro doble, a propósito: se manda `contact_id` (snake_case
+    -- CONFIRMADO EN VIVO contra la respuesta real de GHL, NO contra la
+    documentación oficial: esa doc dice camelCase, pero para esta cuenta el
+    servidor rechaza camelCase con 422 y pide snake_case explícitamente, ver
+    nota completa junto al request en `_buscar_opportunities_pipeline`) como
+    query param, para que GHL haga el filtro de su lado, más barato, PERO
+    ADEMÁS se vuelve a filtrar la respuesta aquí, comparando
     `_contact_id_de_opportunity(op) == contact_id` uno por uno. No es
     redundancia -- es el resguardo real: aunque el nombre del query param ya
-    está confirmado, la forma EXACTA del campo dentro de cada Opportunity de
-    la respuesta (`contactId` vs `contact_id` vs `contact.id` anidado) no se
-    detalla en esa misma documentación, así que si por cualquier motivo el
-    filtro del lado de GHL no aplicara, SIN este segundo filtro se le
-    mostrarían a un cliente las cotizaciones abiertas de OTRO cliente --
-    mismo tipo de riesgo de contacto equivocado que ya se descartó para el
-    flujo de voz (ver buscar_contact_id_por_telefono). Cualquier Opportunity
-    donde no se pueda determinar el contactId con certeza se descarta
-    también (mejor no mostrarla que mostrarla mal).
+    está confirmado en vivo, la forma EXACTA del campo dentro de cada
+    Opportunity de la respuesta (`contactId` vs `contact_id` vs `contact.id`
+    anidado) sigue sin confirmarse, así que si por cualquier motivo el filtro
+    del lado de GHL no aplicara, SIN este segundo filtro se le mostrarían a
+    un cliente las cotizaciones abiertas de OTRO cliente -- mismo tipo de
+    riesgo de contacto equivocado que ya se descartó para el flujo de voz
+    (ver buscar_contact_id_por_telefono). Cualquier Opportunity donde no se
+    pueda determinar el contactId con certeza se descarta también (mejor no
+    mostrarla que mostrarla mal).
 
     Sin GHL_PIPELINE_COTIZACIONES_AUTOS_ID configurado, devuelve [] de una
     vez (no truena) -- el bot simplemente no ofrece esta opción todavía.
@@ -392,16 +394,24 @@ def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
         r = client.get(
             f"{GHL_API_BASE}/opportunities/search",
             params={
-                # camelCase -- CONFIRMADO contra la documentacion oficial
-                # (https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity),
-                # no snake_case. "locationId" es requerido segun esa misma
-                # doc. Bug real detectado en vivo: la primera version de
-                # este archivo mandaba snake_case (location_id/pipeline_id/
-                # contact_id), que GHL simplemente ignoraba -- la request
-                # regresaba 200 OK pero sin filtrar nada de verdad.
-                "locationId": GHL_LOCATION_ID,
-                "pipelineId": GHL_PIPELINE_COTIZACIONES_AUTOS_ID,
-                "contactId": contact_id,
+                # snake_case -- CONFIRMADO EN VIVO contra la respuesta real de
+                # GHL (no contra la documentacion, que en este punto resulto
+                # estar mal/desactualizada para esta cuenta). Bug real
+                # detectado en vivo (segunda vuelta): la documentacion oficial
+                # (https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity)
+                # dice que estos params van en camelCase (locationId/
+                # pipelineId/contactId). Se probo asi y GHL devolvio 422 con
+                # el body: {"message":["property locationId should not
+                # exist","property pipelineId should not exist","property
+                # contactId should not exist","location_id must be a
+                # string","location_id should not be empty"], ...} -- es
+                # decir, el endpoint real para esta cuenta/version RECHAZA el
+                # camelCase y espera snake_case. Se revirtio a snake_case
+                # confiando en la respuesta real del servidor por encima de
+                # la doc.
+                "location_id": GHL_LOCATION_ID,
+                "pipeline_id": GHL_PIPELINE_COTIZACIONES_AUTOS_ID,
+                "contact_id": contact_id,
                 "status": status,
             },
             headers=_headers(),

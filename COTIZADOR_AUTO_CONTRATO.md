@@ -286,22 +286,38 @@ de GHL no llevan espacios) y deja una advertencia clara en el log
 (`ADVERTENCIA: GHL_PIPELINE_COTIZACIONES_AUTOS_ID='...' tiene espacios`),
 pero de todas formas hay que corregir la variable con el ID real.
 
-**Bug real detectado en vivo (ya corregido) -- query params en snake_case:**
-la primera versión de `listar_cotizaciones_abiertas()`/`listar_polizas_activas()`
-mandaba `location_id`/`pipeline_id`/`contact_id` (snake_case) a
+**Bug real detectado en vivo (dos vueltas -- la segunda con evidencia real
+del servidor, no de la doc):**
+
+1ª vuelta: la primera versión de
+`listar_cotizaciones_abiertas()`/`listar_polizas_activas()` mandaba
+`location_id`/`pipeline_id`/`contact_id` (snake_case) a
 `GET /opportunities/search`. Contra la
 [documentación oficial](https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity),
-esos params son **camelCase**: `locationId` (requerido), `pipelineId`,
-`contactId`, `status`. GHL ignoraba silenciosamente los params con el
-nombre equivocado — la request regresaba `200 OK` pero sin filtrar nada de
-verdad. Ya está corregido a camelCase.
+esos params se describen en **camelCase**: `locationId`, `pipelineId`,
+`contactId`, `status`. Se cambió el código a camelCase confiando en esa doc.
+
+2ª vuelta (la real): al probarlo contra la cuenta real, GHL respondió
+`422 Unprocessable Entity` con este body exacto:
+```
+{"message":["property locationId should not exist","property pipelineId should not exist",
+"property contactId should not exist","location_id must be a string","location_id should not be empty"],
+"error":"Unprocessable Entity","statusCode":422}
+```
+Es decir: para esta cuenta/versión, el servidor **rechaza** el camelCase
+que dice la documentación y **exige** snake_case (`location_id` es el
+campo requerido). La doc oficial está mal o desactualizada para esta
+cuenta/versión de la API. Se revirtió el código a snake_case, confiando en
+la respuesta real del servidor por encima de lo que dice la documentación
+-- criterio que aplica para todo el proyecto: nunca se le pone más fe a la
+doc que a una prueba real contra la cuenta.
 
 **Filtro doble, a propósito (protección contra contacto equivocado):**
-aunque el nombre del query param `contactId` ya está confirmado contra la
-documentación oficial, la forma EXACTA del campo dentro de cada Opportunity
-de la *respuesta* (`contactId` vs `contact_id` vs `contact.id` anidado) no
-se detalla ahí, así que `listar_cotizaciones_abiertas()` NO confía
-únicamente en que GHL filtre bien de su lado — vuelve a filtrar la
+aunque el nombre del query param `contact_id` ya está confirmado en vivo
+(no solo contra la doc), la forma EXACTA del campo dentro de cada
+Opportunity de la *respuesta* (`contactId` vs `contact_id` vs `contact.id`
+anidado) sigue sin confirmarse, así que `listar_cotizaciones_abiertas()` NO
+confía únicamente en que GHL filtre bien de su lado — vuelve a filtrar la
 respuesta comparando el contactId de cada Opportunity contra el contacto
 que preguntó, y descarta cualquier Opportunity donde no pueda determinar
 el contactId con certeza. Sin este segundo filtro, si por cualquier motivo
@@ -316,7 +332,10 @@ real): la forma exacta de cada Opportunity en la respuesta (`name`,
 `monetaryValue`, y sobre todo cuál de `contactId`/`contact_id`/`contact.id`
 usa tu cuenta) — si el comando siempre regresa "no tienes ninguna
 cotización abierta" aunque sepas que sí hay una, es lo primero que hay que
-revisar (`_contact_id_de_opportunity` en `ghl_bridge.py`).
+revisar (`_contact_id_de_opportunity` en `ghl_bridge.py`). También queda
+pendiente confirmar si `GET /opportunities/pipelines` (usado para mostrar
+el nombre de la etapa) tiene el mismo problema de casing -- no hay
+evidencia todavía de que falle, pero tampoco se ha confirmado en vivo.
 
 ### Pólizas activas (comando "pólizas activas")
 
