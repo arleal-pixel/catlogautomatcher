@@ -259,39 +259,51 @@ gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
 check(gb.listar_cotizaciones_abiertas("c1") == [],
       "sin GHL_PIPELINE_COTIZACIONES_AUTOS_ID configurado, devuelve [] de una vez (no truena)")
 
-# --- _contact_id_de_opportunity: reconoce las 3 formas posibles ---
+# --- _contact_id_de_opportunity: reconoce las formas posibles, incluida la
+# real de POST /opportunities/search (v3, avanzada): "relations" ---
 check(gb._contact_id_de_opportunity({"contactId": "c1"}) == "c1", "'contactId' (camelCase) se reconoce")
 check(gb._contact_id_de_opportunity({"contact_id": "c1"}) == "c1", "'contact_id' (snake_case) se reconoce")
 check(gb._contact_id_de_opportunity({"contact": {"id": "c1"}}) == "c1", "'contact.id' anidado se reconoce")
+check(gb._contact_id_de_opportunity({
+    "relations": [{"objectKey": "contact", "primary": True, "relationId": "c1", "recordId": "otro-id"}]
+}) == "c1", "'relations' (respuesta real v3): usa relationId de la relacion primary=true objectKey=contact")
+check(gb._contact_id_de_opportunity({
+    "relations": [{"objectKey": "contact", "primary": True, "recordId": "c1"}]
+}) == "c1", "'relations': si no trae relationId, usa recordId como respaldo")
+check(gb._contact_id_de_opportunity({
+    "relations": [{"objectKey": "contact", "primary": False, "relationId": "otro-contacto"},
+                  {"objectKey": "company", "primary": True, "relationId": "una-empresa"}]
+}) is None, "'relations': ignora relaciones que no son el contacto primary")
 check(gb._contact_id_de_opportunity({"name": "sin contacto"}) is None,
       "sin ningun campo de contacto reconocible -> None (no se asume nada)")
 check(gb._contact_id_de_opportunity({}) is None, "dict vacio no truena")
 check(gb._contact_id_de_opportunity(None) is None, "None no truena")
 
-# --- listar_cotizaciones_abiertas: filtro DOBLE -- aunque el query param de
-# GHL no filtre bien (o venga mal escrito), NUNCA se le muestran a un
-# contacto las Opportunities de OTRO contacto. Se mockea httpx directo para
-# simular una respuesta de GHL que trae Opportunities de varios contactos
-# mezcladas (como si el filtro de query param no hubiera aplicado).
+# --- listar_cotizaciones_abiertas: usa POST /opportunities/search (v3,
+# avanzada) con filters reales -- CONFIRMADO EN VIVO contra la doc real
+# (ver ghl_bridge.py). El filtro de seguridad local sigue existiendo: si
+# GHL regresara Opportunities de otro contacto mezcladas (server-side
+# filter fallando por cualquier motivo), igual se descartan aqui. Las
+# Opportunities SIN contactId detectable YA NO se descartan a ciegas
+# (antes si) -- se confia en que el servidor ya filtro por contact_id.
 class _RespuestaFalsa:
     status_code = 200
     def json(self):
         return {"opportunities": [
             {"name": "TOYOTA COROLLA (de c1)", "contactId": "c1"},
-            {"name": "VOLKSWAGEN JETTA (de c2, NO deberia salir)", "contactId": "c2"},
-            {"name": "MAZDA 3 (sin contactId detectable, NO deberia salir)"},
+            {"name": "VOLKSWAGEN JETTA (de c2, NO deberia salir -- mismatch explicito)", "contactId": "c2"},
+            {"name": "MAZDA 3 (sin contactId detectable, SI deberia salir -- se confia en el servidor)"},
         ]}
 
 class _ClienteFalso:
     def __init__(self, *a, **k): pass
     def __enter__(self): return self
     def __exit__(self, *a): return False
-    def get(self, *a, **k): return _RespuestaFalsa()
+    def post(self, *a, **k): return _RespuestaFalsa()
 
 gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
 gb.GHL_API_TOKEN = "fake-token"
 _httpx_original = gb.httpx.Client
-_diagnosticar_opportunities_vacio_real = gb._diagnosticar_opportunities_vacio
 gb.httpx.Client = _ClienteFalso
 try:
     resultado_filtro = gb.listar_cotizaciones_abiertas("c1")
@@ -299,9 +311,13 @@ finally:
     gb.httpx.Client = _httpx_original
     gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
 
-check(len(resultado_filtro) == 1 and resultado_filtro[0]["name"] == "TOYOTA COROLLA (de c1)",
-      f"aunque GHL regrese Opportunities de otros contactos mezcladas, SOLO se quedan las de c1 "
-      f"(obtuvo {resultado_filtro})")
+check(len(resultado_filtro) == 2
+      and {op["name"] for op in resultado_filtro} == {
+          "TOYOTA COROLLA (de c1)",
+          "MAZDA 3 (sin contactId detectable, SI deberia salir -- se confia en el servidor)",
+      },
+      f"se queda con la de c1 y con la que no trae contactId detectable, descarta SOLO la de c2 "
+      f"(mismatch explicito) (obtuvo {resultado_filtro})")
 
 # --------------------------------------------------------------------------
 # obtener_etapas_pipeline / _buscar_opportunities_pipeline: nombre legible
@@ -332,8 +348,12 @@ class _ClienteConEtapaFalso:
     def __enter__(self): return self
     def __exit__(self, *a): return False
     def get(self, url, *a, **k):
-        if "/opportunities/pipelines" in url:
-            return _RespuestaPipelinesFalsa()
+        # obtener_etapas_pipeline SIGUE usando GET /opportunities/pipelines
+        # -- endpoint distinto al de busqueda, no se toco.
+        return _RespuestaPipelinesFalsa()
+    def post(self, url, *a, **k):
+        # _buscar_opportunities_pipeline usa POST /opportunities/search
+        # (v3, avanzada) -- ver ghl_bridge.py.
         return _RespuestaOpportunitiesConEtapa()
 
 gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
@@ -463,8 +483,9 @@ check(gb._es_listar_polizas("cotizaciones abiertas") is False,
 check(gb._es_listar_polizas("jetta 2020") is False, "una descripcion de vehiculo NO se confunde con el comando")
 check(gb._es_listar_polizas("hola") is False, "un saludo NO se confunde con el comando")
 
-# --- listar_polizas_activas: usa status=GHL_STATUS_POLIZA_ACTIVA en la consulta ---
-_params_capturados = []
+# --- listar_polizas_activas: usa POST /opportunities/search (v3, avanzada)
+# con filters=[pipeline_id, contact_id, status=GHL_STATUS_POLIZA_ACTIVA] ---
+_bodies_capturados = []
 class _RespuestaPolizasFalsa:
     status_code = 200
     def json(self):
@@ -476,10 +497,10 @@ class _ClientePolizasFalso:
     def __init__(self, *a, **k): pass
     def __enter__(self): return self
     def __exit__(self, *a): return False
-    def get(self, url, params=None, **k):
-        if "/opportunities/pipelines" in url:
-            return _RespuestaPipelinesFalsa()
-        _params_capturados.append(params)
+    def get(self, url, *a, **k):
+        return _RespuestaPipelinesFalsa()
+    def post(self, url, json=None, **k):
+        _bodies_capturados.append(json or {})
         return _RespuestaPolizasFalsa()
 
 gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
@@ -491,39 +512,39 @@ finally:
     gb.httpx.Client = _httpx_original
     gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
 
-check(_params_capturados and _params_capturados[0]["status"] == gb.GHL_STATUS_POLIZA_ACTIVA == "won",
-      f"listar_polizas_activas consulta con status='won' (GHL_STATUS_POLIZA_ACTIVA), no 'open' "
-      f"(obtuvo params={_params_capturados})")
+def _filtro(body, campo):
+    for f in body.get("filters", []):
+        if f.get("field") == campo:
+            return f
+    return None
+
+check(_bodies_capturados and _filtro(_bodies_capturados[0], "status") == {"field": "status", "operator": "eq", "value": "won"},
+      f"listar_polizas_activas filtra status='won' (GHL_STATUS_POLIZA_ACTIVA), no 'open' "
+      f"(obtuvo body={_bodies_capturados})")
 check(len(resultado_polizas) == 1 and resultado_polizas[0]["name"] == "HONDA CR-V TURBO PLUS"
       and resultado_polizas[0].get("_etapa_nombre") == "Oportunidad Ganada",
       f"la poliza activa se lista con su nombre y etapa (obtuvo {resultado_polizas})")
 
-# --- regresion: los query params de /opportunities/search son snake_case,
-# CONFIRMADO EN VIVO contra la respuesta real de GHL -- la doc oficial dice
-# camelCase, pero para esta cuenta el servidor devolvio 422 con
-# "property locationId should not exist" + "location_id must be a string"
-# cuando se probo camelCase. Se revirtio a snake_case confiando en la
-# respuesta real del servidor por encima de la doc. ---
-check(set(_params_capturados[0].keys()) == {"location_id", "pipeline_id", "status"},
-      f"/opportunities/search se llama con location_id/pipeline_id/status en snake_case "
-      f"(obtuvo {_params_capturados[0]})")
-check(_params_capturados[0]["pipeline_id"] == "pipeline-fake", "pipeline_id (snake_case) lleva el pipeline correcto")
-
-# --- regresion: contact_id NO se manda como query param al servidor (bug
-# real detectado en vivo, tercera vuelta -- ver nota en
-# _buscar_opportunities_pipeline). El filtro por contacto ahora es 100%
-# local, comparando cada Opportunity via _contact_id_de_opportunity. ---
-check("contact_id" not in _params_capturados[0],
-      f"contact_id NO se manda a GHL como query param -- el filtro es local "
-      f"(obtuvo {_params_capturados[0]})")
+# --- regresion: POST /opportunities/search (v3, avanzada) -- CONFIRMADO
+# EN VIVO contra la doc real (https://marketplace.gohighlevel.com/docs/ghl/
+# opportunities/search-opportunities-advanced), no la basica (esa demostro
+# no filtrar bien por pipeline_id -- ver el historial completo en
+# ghl_bridge.py). Envelope en camelCase (locationId), filtros en
+# snake_case (pipeline_id, contact_id, status), Version: v3. ---
+check(_bodies_capturados[0].get("locationId") == gb.GHL_LOCATION_ID,
+      f"el body manda locationId (camelCase, envelope) (obtuvo {_bodies_capturados[0]})")
+check(_filtro(_bodies_capturados[0], "pipeline_id") == {"field": "pipeline_id", "operator": "eq", "value": "pipeline-fake"},
+      f"el body filtra pipeline_id='pipeline-fake' con operador eq (obtuvo {_bodies_capturados[0]})")
+check(_filtro(_bodies_capturados[0], "contact_id") == {"field": "contact_id", "operator": "eq", "value": "c-poliza"},
+      f"el body filtra contact_id='c-poliza' con operador eq -- YA SI se manda al servidor "
+      f"(bug real de la API basica resuelto usando la avanzada) (obtuvo {_bodies_capturados[0]})")
 
 # --- resguardo: GHL_PIPELINE_COTIZACIONES_AUTOS_ID con espacios (caso real
 # -- alguien puso el NOMBRE del pipeline en vez de su ID) no truena, solo
-# imprime una advertencia y sigue (la busqueda simplemente no encuentra
-# nada, como paso en la cuenta real). ---
+# imprime una advertencia y sigue. ---
 gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "Cotizaciones autos Segupoliza"  # nombre, NO id -- a proposito
 gb.httpx.Client = _ClientePolizasFalso
-_params_capturados.clear()
+_bodies_capturados.clear()
 try:
     # se llama _buscar_opportunities_pipeline DIRECTO (no listar_cotizaciones_abiertas,
     # que ya quedo monkeypatcheado por las pruebas de 'reiniciar' de arriba)
@@ -531,90 +552,10 @@ try:
 finally:
     gb.httpx.Client = _httpx_original
     gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
-check(_params_capturados and _params_capturados[0]["pipeline_id"] == "Cotizaciones autos Segupoliza",
+check(_bodies_capturados and _filtro(_bodies_capturados[0], "pipeline_id", ) == {
+          "field": "pipeline_id", "operator": "eq", "value": "Cotizaciones autos Segupoliza"},
       f"con GHL_PIPELINE_COTIZACIONES_AUTOS_ID mal configurado (nombre en vez de id), NO truena -- solo "
-      f"advierte y manda ese valor tal cual (obtuvo params={_params_capturados})")
-
-# --- _diagnosticar_opportunities_vacio: 2 GETs extra de solo lectura cuando
-# la busqueda principal da 0, para distinguir en el log si el sospechoso es
-# el status, el pipeline_id, o location_id/autenticacion -- nunca truena ni
-# cambia el resultado que ya se le muestra al cliente. ---
-_params_diag = []
-class _RespuestaDiagConDatos:
-    status_code = 200
-    def json(self):
-        return {"opportunities": [{"name": "algo"}, {"name": "otra"}]}
-
-class _RespuestaDiagVacia:
-    status_code = 200
-    def json(self):
-        return {"opportunities": []}
-
-class _ClienteDiagFalso:
-    def __init__(self, *a, **k): pass
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
-    def get(self, url, params=None, **k):
-        _params_diag.append(dict(params or {}))
-        # con pipeline_id -> si trae datos; solo location_id -> tambien trae datos
-        return _RespuestaDiagConDatos()
-
-gb.GHL_LOCATION_ID = "loc-diag"
-gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-diag"
-gb.httpx.Client = _ClienteDiagFalso
-try:
-    gb._diagnosticar_opportunities_vacio("open")
-finally:
-    gb.httpx.Client = _httpx_original
-    gb.GHL_LOCATION_ID = None
-    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
-
-check(len(_params_diag) == 2, f"hace exactamente 2 GETs de diagnostico (obtuvo {len(_params_diag)})")
-check(set(_params_diag[0].keys()) == {"location_id", "pipeline_id"} and "status" not in _params_diag[0],
-      f"el primer GET manda location_id+pipeline_id SIN status (obtuvo {_params_diag[0]})")
-check(set(_params_diag[1].keys()) == {"location_id"},
-      f"el segundo GET manda SOLO location_id (obtuvo {_params_diag[1]})")
-
-# --- no truena si las llamadas de diagnostico fallan (red, 500, etc.) ---
-class _ClienteDiagQueTruena:
-    def __init__(self, *a, **k): pass
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
-    def get(self, url, params=None, **k):
-        raise RuntimeError("simulado: fallo de red")
-
-gb.GHL_LOCATION_ID = "loc-diag"
-gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-diag"
-gb.httpx.Client = _ClienteDiagQueTruena
-try:
-    gb._diagnosticar_opportunities_vacio("open")  # no debe tronar
-    diag_no_tronó = True
-except Exception:
-    diag_no_tronó = False
-finally:
-    gb.httpx.Client = _httpx_original
-    gb.GHL_LOCATION_ID = None
-    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
-check(diag_no_tronó, "si las llamadas de diagnostico fallan (ej. red), NO truena -- solo se pierde el diagnostico")
-
-# --- _diagnosticar_opportunities_vacio se dispara automaticamente cuando la
-# busqueda principal da 0 (integrado con _buscar_opportunities_pipeline) ---
-_diag_llamado = []
-gb._diagnosticar_opportunities_vacio = lambda status: _diag_llamado.append(status)
-gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
-gb.httpx.Client = _ClientePolizasFalso  # ya definida arriba, regresa 1 Opportunity de OTRO contacto
-_params_capturados.clear()
-try:
-    gb._buscar_opportunities_pipeline("contacto-que-no-existe", status="open")
-finally:
-    gb.httpx.Client = _httpx_original
-    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
-# _ClientePolizasFalso SI regresa una Opportunity (solo que de otro contacto),
-# asi que oportunidades no queda vacio -- el diagnostico NO deberia dispararse
-# en ese caso (solo se dispara cuando GHL regresa 0 Opportunities en total,
-# no cuando el filtro por contacto descarta las que si trajo).
-check(_diag_llamado == [], "el diagnostico NO se dispara si GHL SI trajo Opportunities (aunque sean de otro contacto)")
-gb._diagnosticar_opportunities_vacio = _diagnosticar_opportunities_vacio_real
+      f"advierte y manda ese valor tal cual (obtuvo body={_bodies_capturados})")
 
 # --- _formatear_polizas_activas ---
 texto_polizas_vacio = gb._formatear_polizas_activas([])

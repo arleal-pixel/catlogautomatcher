@@ -286,8 +286,8 @@ de GHL no llevan espacios) y deja una advertencia clara en el log
 (`ADVERTENCIA: GHL_PIPELINE_COTIZACIONES_AUTOS_ID='...' tiene espacios`),
 pero de todas formas hay que corregir la variable con el ID real.
 
-**Bug real detectado en vivo (tres vueltas -- la segunda y tercera con
-evidencia real del servidor, no de la doc):**
+**Bug real detectado en vivo (cuatro vueltas -- terminó siendo el endpoint
+básico de GHL el que no filtraba bien, no un typo de nuestro lado):**
 
 1ª vuelta: la primera versión de
 `listar_cotizaciones_abiertas()`/`listar_polizas_activas()` mandaba
@@ -312,43 +312,70 @@ la respuesta real del servidor por encima de lo que dice la documentación
 -- criterio que aplica para todo el proyecto: nunca se le pone más fe a la
 doc que a una prueba real contra la cuenta.
 
-3ª vuelta (la más reveladora): ya con `location_id`/`pipeline_id` correctos
-y confirmados, se probó mandar además `contact_id` como query param, usando
-un contacto que se verificó de forma directa en GHL (se abrió su ficha y se
-confirmó su ID en la URL) que SÍ tenía una Opportunity abierta real en ese
-pipeline. Aun así, GHL respondió `{"total": 0, ...}` -- ninguna Opportunity
-encontrada. Es decir: el filtro por `contact_id` de este endpoint **no es
-confiable** para esta cuenta cuando se combina con `pipeline_id` (parece un
-bug del lado de GHL, no de casing ni de configuración). Se dejó de mandar
-`contact_id` al servidor por completo: ahora `_buscar_opportunities_pipeline`
-pide TODO el pipeline con el `status` que corresponda (sin filtrar por
-contacto del lado de GHL) y filtra la respuesta 100% aquí mismo.
+3ª vuelta: ya con `location_id`/`pipeline_id` correctos y confirmados, se
+probó mandar además `contact_id` como query param, usando un contacto que
+se verificó de forma directa en GHL (se abrió su ficha y se confirmó su ID
+en la URL) que SÍ tenía una Opportunity abierta real en ese pipeline. Aun
+así, GHL respondió `{"total": 0, ...}` -- ninguna Opportunity encontrada.
+Se agregó diagnóstico automático (2 requests extra de solo lectura cuando
+la búsqueda principal da 0) para aislar la causa, y con eso se confirmó
+que ni siquiera `location_id`+`pipeline_id` (sin ningún filtro de
+contacto) traía resultados -- mientras que `location_id` solo sí traía
+todas las Opportunities de la cuenta. Es decir: el problema real no era
+`contact_id`, era que **el endpoint BÁSICO (`GET /opportunities/search`)
+no filtra de forma confiable por `pipeline_id`** para esta cuenta.
 
-**Filtro por contacto, ahora 100% local (antes era solo un resguardo, ahora
-es el filtro real):** como GHL no filtra de forma confiable por
-`contact_id` combinado con `pipeline_id` (ver 3ª vuelta arriba),
-`listar_cotizaciones_abiertas()` pide todas las Opportunities del pipeline
-con el `status` pedido, y filtra la respuesta aquí comparando el
-`contactId` de cada Opportunity contra el contacto que preguntó
-(`_contact_id_de_opportunity`), descartando cualquier Opportunity donde no
-se pueda determinar el contactId con certeza -- mismo criterio de "mejor no
-mostrarla que mostrarla mal" que el resguardo de contacto equivocado del
-flujo de voz (ver `buscar_contact_id_por_telefono`).
+4ª vuelta (la definitiva -- el cliente encontró la API correcta): GHL
+tiene una segunda API de Opportunities, la **"avanzada"**
+(`POST /opportunities/search`, documentada en
+https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunities-advanced
+y en detalle en https://doc.clickup.com/8631005/d/h/87cpx-424216/7bf11bc9b94f80f),
+completamente distinta al endpoint básico que se venía usando. Sus
+diferencias clave, confirmadas contra esa documentación:
+
+- Es **POST**, no GET, y el body va en JSON.
+- Header `Version: v3` (NO el `GHL_API_VERSION` de fecha que usa el resto
+  de la app -- un tercer versionado distinto, junto al de Custom Objects).
+- El envelope del body usa **camelCase** (`locationId`, `limit`, `page`,
+  `filters`, `sort`, `additionalDetails`).
+- El filtrado real va en un array `filters`, cada uno
+  `{"field": ..., "operator": ..., "value": ...}`, y ESOS nombres de campo
+  sí son **snake_case** (`pipeline_id`, `contact_id`, `status`, todos con
+  operador `"eq"` para igualdad exacta). Este es el endpoint que SÍ soporta
+  filtrar por contacto + pipeline + status combinados de forma confiable
+  (es su propósito documentado, a diferencia del básico).
+
+Se migró `_buscar_opportunities_pipeline` por completo a este endpoint.
+`contact_id` ahora SÍ se manda al servidor como filtro real.
+
+**Filtro de seguridad local (defensa en profundidad, ya no es el filtro
+principal):** aunque ahora el servidor sí filtra por contacto de forma
+confiable, `listar_cotizaciones_abiertas()` conserva un chequeo extra
+comparando el `contactId` de cada Opportunity contra el contacto que
+preguntó (`_contact_id_de_opportunity`) -- si se puede identificar y NO
+coincide, se descarta (nunca se le muestra a un cliente una Opportunity de
+otro). Si no se puede identificar el contactId (forma de respuesta nueva,
+no cubierta), YA NO se descarta a ciegas como antes -- se confía en el
+filtro real del servidor, y se deja un log para investigarlo. La respuesta
+real de este endpoint, además, NO trae el contacto como campo plano
+(`contactId`) -- lo trae dentro de un array `relations`, en la entrada con
+`objectKey: "contact"` y `primary: true` (campos `relationId`/`recordId`,
+la doc no aclara cuál de los dos es el id real, así que
+`_contact_id_de_opportunity` revisa ambos).
 
 **Pendiente de confirmar en vivo** (mismo criterio que el resto del
 proyecto — no se le puso mucha fe a algo sin probarlo contra la cuenta
-real): la forma exacta de cada Opportunity en la respuesta (`name`,
-`monetaryValue`, y sobre todo cuál de `contactId`/`contact_id`/`contact.id`
-usa tu cuenta) — si el comando siempre regresa "no tienes ninguna
-cotización abierta" aunque sepas que sí hay una, es lo primero que hay que
-revisar (`_contact_id_de_opportunity` en `ghl_bridge.py`). También queda
-pendiente confirmar si `GET /opportunities/pipelines` (usado para mostrar
-el nombre de la etapa) tiene el mismo problema de casing -- no hay
-evidencia todavía de que falle, pero tampoco se ha confirmado en vivo.
-Y si el pipeline llega a crecer mucho (cientos de Opportunities abiertas a
-la vez), pedir todo el pipeline sin filtrar por contacto del lado de GHL
-puede volverse más lento -- por ahora el volumen de este bot no lo
-justifica, pero es lo primero a revisar si esto se siente lento algún día.
+real): si dentro de `relations`, `relationId` o `recordId` es realmente el
+id del contacto (o si ambos matchean, o ninguno) -- solo se puede
+confirmar viendo una respuesta real. Si el comando siempre regresa "no
+tienes ninguna cotización abierta" aunque sepas que sí hay una, y ya
+confirmaste que `GHL_PIPELINE_COTIZACIONES_AUTOS_ID` es el ID correcto,
+revisa el log `[opportunities] ... al menos una Opportunity ... no trae un
+contactId reconocible` -- ahí se imprime la forma real de la respuesta.
+También queda pendiente confirmar si `GET /opportunities/pipelines`
+(usado para mostrar el nombre de la etapa -- endpoint distinto, sigue
+siendo el básico) tiene algún problema similar -- no hay evidencia
+todavía de que falle.
 
 ### Pólizas activas (comando "pólizas activas")
 

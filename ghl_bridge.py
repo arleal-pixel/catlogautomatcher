@@ -151,6 +151,31 @@ def _headers_objetos() -> dict:
     }
 
 
+# La API "avanzada" de busqueda de Opportunities (POST /opportunities/search
+# con body de filtros reales -- ver _buscar_opportunities_pipeline) exige el
+# header Version literal "v3", CONFIRMADO contra su documentacion oficial
+# (https://doc.clickup.com/8631005/d/h/87cpx-424216/7bf11bc9b94f80f,
+# enlazada desde https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunities-advanced).
+# Es una API DISTINTA a la basica (GET /opportunities/search, que usa
+# GHL_API_VERSION) y distinta tambien a la de Custom Objects
+# (GHL_OBJETOS_VERSION) -- tres versionados diferentes dentro de la misma
+# cuenta de GHL.
+GHL_OPPORTUNITIES_SEARCH_VERSION = "v3"
+
+
+def _headers_busqueda_opportunities() -> dict:
+    """Igual que _headers() pero con el Version que espera la API avanzada
+    de busqueda de Opportunities (ver GHL_OPPORTUNITIES_SEARCH_VERSION
+    arriba)."""
+    if not GHL_API_TOKEN:
+        raise GHLError("Falta GHL_API_TOKEN en el entorno (Private Integration Token de GoHighLevel).")
+    return {
+        "Authorization": f"Bearer {GHL_API_TOKEN}",
+        "Version": GHL_OPPORTUNITIES_SEARCH_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
 def enviar_whatsapp(contact_id: str, texto: str, conversation_id: Optional[str] = None) -> dict:
     """Manda `texto` por WhatsApp al contacto de GHL via la API de
     Conversaciones (POST /conversations/messages, type='WhatsApp').
@@ -249,10 +274,26 @@ def agregar_tag(contact_id: str, tag: str) -> None:
 def _contact_id_de_opportunity(op: dict) -> Optional[str]:
     """Extrae el contactId de una Opportunity devuelta por GHL, sin asumir
     una sola forma -- distintas versiones/endpoints de su API lo regresan
-    como `contactId`, `contact_id`, o anidado en `contact.id`. Devuelve
-    None si no se encuentra en NINGUNA de esas formas (ver
-    listar_cotizaciones_abiertas: una Opportunity sin contactId detectable
-    se descarta, nunca se asume que "es del contacto correcto")."""
+    distinto. Formas conocidas, en orden:
+
+    1. `contactId` / `contact_id` plano, o anidado en `contact.id` --
+       formas "clasicas" que se cubrian desde antes.
+    2. `relations` (CONFIRMADO EN VIVO contra la doc real de
+       POST /opportunities/search -- ver _buscar_opportunities_pipeline):
+       un array de asociaciones, donde la entrada con
+       `objectKey == "contact"` y `primary == True` es el contacto
+       principal de la Opportunity. Esa entrada trae tanto `relationId`
+       como `recordId` -- la doc no deja 100% claro cual de los dos ES el
+       id del contacto (ambos aparentan serlo), asi que se revisan los
+       dos, en ese orden.
+
+    Devuelve None si no se encuentra en NINGUNA de esas formas -- ver
+    _buscar_opportunities_pipeline: como ahora el filtro por contact_id ya
+    se manda al servidor (real, documentado), una Opportunity sin
+    contactId detectable aqui YA NO se descarta a ciegas -- se confia en el
+    filtro del servidor, pero se deja un log si esto pasa seguido (podria
+    significar que la respuesta trae una forma nueva, todavia no cubierta
+    aqui)."""
     if not isinstance(op, dict):
         return None
     directo = op.get("contactId") or op.get("contact_id")
@@ -261,6 +302,13 @@ def _contact_id_de_opportunity(op: dict) -> Optional[str]:
     contacto = op.get("contact")
     if isinstance(contacto, dict) and contacto.get("id"):
         return str(contacto["id"])
+    relaciones = op.get("relations")
+    if isinstance(relaciones, list):
+        for rel in relaciones:
+            if isinstance(rel, dict) and rel.get("objectKey") == "contact" and rel.get("primary"):
+                candidato = rel.get("relationId") or rel.get("recordId")
+                if candidato:
+                    return str(candidato)
     return None
 
 
@@ -298,53 +346,55 @@ def obtener_etapas_pipeline(pipeline_id: str) -> Dict[str, str]:
                 for etapa in (pipeline.get("stages") or [])
                 if etapa.get("id") and etapa.get("name")
             }
+    # Diagnostico -- a proposito: si no matcheo ningun pipeline con ese id,
+    # imprime el id+nombre de TODOS los pipelines que si regreso GHL, para
+    # poder comparar a simple vista contra GHL_PIPELINE_COTIZACIONES_AUTOS_ID
+    # (bug real sospechoso: el id que se ve en la URL del navegador al abrir
+    # un pipeline en GHL podria no ser exactamente el mismo "id" que usa esta
+    # API para filtrar -- esto lo confirma o lo descarta de una vez).
+    disponibles = [(p.get("id"), p.get("name")) for p in pipelines]
+    print(f"[opportunities] pipeline_id='{pipeline_id}' NO aparece en la respuesta de "
+          f"GET /opportunities/pipelines. Pipelines que SI regreso GHL (id, nombre): {disponibles}")
     return {}
 
 
 def listar_cotizaciones_abiertas(contact_id: str) -> List[dict]:
-    """GET /opportunities/search -- lista las Opportunities ABIERTAS
-    (status "open", ni ganadas ni perdidas) del pipeline "cotizaciones
-    autos" PARA ESTE CONTACTO. SOLO LECTURA a propósito -- ver
-    GHL_PIPELINE_COTIZACIONES_AUTOS_ID arriba: no creamos ni movemos nada
-    de este lado, GHL/su workflow es quien administra ese pipeline cuando
-    Segupoliza le manda el resultado real directo a GHL.
+    """POST /opportunities/search (API AVANZADA, con filtros reales) --
+    lista las Opportunities ABIERTAS (status "open", ni ganadas ni
+    perdidas) del pipeline "cotizaciones autos" PARA ESTE CONTACTO. SOLO
+    LECTURA a propósito -- ver GHL_PIPELINE_COTIZACIONES_AUTOS_ID arriba:
+    no creamos ni movemos nada de este lado, GHL/su workflow es quien
+    administra ese pipeline cuando Segupoliza le manda el resultado real
+    directo a GHL.
 
-    IMPORTANTE -- el filtro por contacto se hace 100% AQUÍ, no en GHL (bug
-    real detectado en vivo, tercera vuelta): se probó mandar `contact_id`
-    como query param a `/opportunities/search` (snake_case, confirmado
-    contra la respuesta real -- ver nota completa junto al request en
-    `_buscar_opportunities_pipeline`), CON un contacto que se verificó tenía
-    una Opportunity abierta real en el pipeline correcto (se confirmó el ID
-    del contacto directo desde la URL de su ficha en GHL) -- y aun así GHL
-    regresaba `{"total": 0, ...}`. Es decir, filtrar por `contact_id` en este
-    endpoint no es confiable para esta cuenta cuando se combina con
-    `pipeline_id`. Por eso `_buscar_opportunities_pipeline` YA NO manda
-    `contact_id` al servidor: pide TODO el pipeline con el `status` que
-    corresponda, y filtra la respuesta aquí mismo, comparando
-    `_contact_id_de_opportunity(op) == contact_id` uno por uno. Cualquier
-    Opportunity donde no se pueda determinar el contactId con certeza se
-    descarta también (mejor no mostrarla que mostrarla mal, mismo criterio
-    que el resguardo de contacto equivocado del flujo de voz -- ver
-    buscar_contact_id_por_telefono).
+    IMPORTANTE -- historia completa de POR QUÉ es este endpoint y no otro
+    (cuatro vueltas, cada una con evidencia real, no solo doc -- ver
+    también `_buscar_opportunities_pipeline` y COTIZADOR_AUTO_CONTRATO.md):
+
+    1ª-3ª vuelta: se probó con `GET /opportunities/search` (la API
+    "básica", solo query params) en varias combinaciones -- camelCase,
+    snake_case, con/sin contact_id -- y terminó confirmándose EN VIVO que
+    ese endpoint NO filtra de forma confiable por `pipeline_id` para esta
+    cuenta (con `location_id`+`pipeline_id` correctos y sin ningún otro
+    filtro, regresaba 0 Opportunities, aunque `location_id` solo sí traía
+    resultados).
+
+    4ª vuelta (la buena): el cliente encontró la documentación de la API
+    "avanzada" real -- `POST /opportunities/search`, header `Version: v3`,
+    body con un array `filters` de `{field, operator, value}` (campos
+    documentados: `pipeline_id`, `contact_id`, `status`, todos con operador
+    `eq`) -- ver https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunities-advanced
+    y el doc detallado enlazado ahí: https://doc.clickup.com/8631005/d/h/87cpx-424216/7bf11bc9b94f80f.
+    Esta SÍ es la forma soportada de filtrar por pipeline+contacto+status
+    en un solo request -- se migró a este endpoint por completo (ver
+    `_buscar_opportunities_pipeline`).
 
     Sin GHL_PIPELINE_COTIZACIONES_AUTOS_ID configurado, devuelve [] de una
     vez (no truena) -- el bot simplemente no ofrece esta opción todavía.
     OJO: esa variable tiene que ser el ID del pipeline (algo como
     "b2G6yEywmZfoV0uSjjhF"), NO su nombre -- sácalo del campo "id" de
     GET /opportunities/pipelines (ver obtener_etapas_pipeline más arriba),
-    no del nombre que se ve en el UI de GHL. Bug real detectado en vivo:
-    configurarlo con el NOMBRE del pipeline (ej. "Cotizaciones autos
-    Segupoliza") hace que la búsqueda no encuentre nada, aunque la request
-    regrese 200 OK -- simplemente ningún pipeline tiene ese texto como id.
-
-    NOTA: la forma exacta de cada Opportunity en la respuesta (`name`,
-    `monetaryValue`, `pipelineStageId`, y sobre todo cuál de
-    `contactId`/`contact_id`/`contact.id` trae de verdad) sigue sin
-    confirmarse en vivo -- si esto siempre devuelve vacío aunque sepas que
-    hay Opportunities abiertas para ese contacto Y ya verificaste que
-    GHL_PIPELINE_COTIZACIONES_AUTOS_ID es el ID (no el nombre) correcto,
-    revisa `_contact_id_de_opportunity` (puede que el campo real tenga otro
-    nombre que todavía no cubrimos)."""
+    no del nombre que se ve en el UI de GHL."""
     return _buscar_opportunities_pipeline(contact_id, status="open")
 
 
@@ -353,8 +403,8 @@ def listar_polizas_activas(contact_id: str) -> List[dict]:
     EMITIDAS -- Opportunities del mismo pipeline "cotizaciones autos" con
     status=GHL_STATUS_POLIZA_ACTIVA (por default "won", el status nativo de
     GHL que se pone solo cuando una Opportunity llega a la etapa
-    "Oportunidad Ganada"). Mismo filtro doble por contactId, mismo criterio
-    de solo lectura -- ver listar_cotizaciones_abiertas.
+    "Oportunidad Ganada"). Mismo mecanismo de filtrado -- ver
+    listar_cotizaciones_abiertas.
 
     PENDIENTE a propósito: todavía no expone el link/PDF de la póliza (ver
     la nota junto a GHL_STATUS_POLIZA_ACTIVA, arriba) -- ese campo no está
@@ -363,60 +413,33 @@ def listar_polizas_activas(contact_id: str) -> List[dict]:
     return _buscar_opportunities_pipeline(contact_id, status=GHL_STATUS_POLIZA_ACTIVA)
 
 
-def _diagnosticar_opportunities_vacio(status: str) -> None:
-    """SOLO diagnostico -- se llama unicamente cuando _buscar_opportunities_pipeline
-    ya regreso 0 Opportunities, para ayudar a distinguir EN EL LOG entre 3
-    causas posibles sin necesitar otra ronda de pruebas en vivo:
-
-    1. location_id solo (sin pipeline_id ni status) -- si esto tambien da 0,
-       el problema es de location_id/autenticacion, no del pipeline.
-    2. location_id + pipeline_id (sin status) -- si esto SI trae resultados
-       pero la busqueda con status=... daba 0, el problema es el filtro de
-       `status` (puede que el valor real en la cuenta no sea "open"/"won"
-       en minusculas, o que el query param de status tenga otro nombre).
-    3. Si ni siquiera location_id+pipeline_id (sin status) trae nada, el
-       problema esta en pipeline_id -- revisa que sea el ID correcto (sacado
-       de la URL de GHL al entrar al pipeline, tab "Stages").
-
-    Nunca truena ni cambia el resultado que ya se le va a mostrar al
-    cliente -- son 2 GETs extra de solo lectura, con try/except silencioso
-    si algo sale mal (mejor no diagnosticar que romper el flujo normal)."""
-    try:
-        with httpx.Client(timeout=10) as client:
-            r_pipeline = client.get(
-                f"{GHL_API_BASE}/opportunities/search",
-                params={"location_id": GHL_LOCATION_ID, "pipeline_id": GHL_PIPELINE_COTIZACIONES_AUTOS_ID},
-                headers=_headers(),
-            )
-        n_pipeline = len((r_pipeline.json().get("opportunities") or [])) if r_pipeline.status_code < 300 else None
-        print(f"[opportunities][diagnostico] location_id+pipeline_id SIN status: "
-              f"{'status ' + str(r_pipeline.status_code) if n_pipeline is None else str(n_pipeline) + ' Opportunity(ies)'} "
-              f"-- si esto es >0 pero status='{status}' dio 0, el filtro de 'status' es el sospechoso.")
-    except Exception as e:
-        print(f"[opportunities][diagnostico] fallo probando sin status: {e}")
-
-    try:
-        with httpx.Client(timeout=10) as client:
-            r_location = client.get(
-                f"{GHL_API_BASE}/opportunities/search",
-                params={"location_id": GHL_LOCATION_ID},
-                headers=_headers(),
-            )
-        n_location = len((r_location.json().get("opportunities") or [])) if r_location.status_code < 300 else None
-        print(f"[opportunities][diagnostico] SOLO location_id (sin pipeline_id ni status): "
-              f"{'status ' + str(r_location.status_code) if n_location is None else str(n_location) + ' Opportunity(ies)'} "
-              f"-- si esto es 0, el problema es location_id/autenticacion, no el pipeline. Si es >0 pero lo "
-              f"de arriba (con pipeline_id) dio 0, el pipeline_id es el sospechoso.")
-    except Exception as e:
-        print(f"[opportunities][diagnostico] fallo probando solo location_id: {e}")
-
-
 def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
     """Logica compartida entre listar_cotizaciones_abiertas (status="open")
-    y listar_polizas_activas (status=GHL_STATUS_POLIZA_ACTIVA) -- misma
-    llamada a GET /opportunities/search, mismo filtro doble por contactId
-    (ver _contact_id_de_opportunity) para nunca mostrarle a un cliente
-    Opportunities de otro contacto.
+    y listar_polizas_activas (status=GHL_STATUS_POLIZA_ACTIVA).
+
+    Usa la API AVANZADA de búsqueda de Opportunities -- `POST
+    /opportunities/search`, header `Version: v3` (ver
+    _headers_busqueda_opportunities), body con un array `filters` de
+    `{field, operator, value}` combinados con AND implícito:
+    `pipeline_id`, `contact_id`, `status`, los tres con operador `eq`.
+    CONFIRMADO contra la documentación real (no la básica, que resultó no
+    filtrar de forma confiable -- ver el historial completo en el
+    docstring de listar_cotizaciones_abiertas):
+    https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunities-advanced
+    https://doc.clickup.com/8631005/d/h/87cpx-424216/7bf11bc9b94f80f
+
+    El filtro por contacto YA se manda al servidor (real, documentado) --
+    a diferencia de la version anterior de esta función, que tenía que
+    hacerlo 100% del lado de aquí porque el endpoint básico no lo
+    respetaba. Aun así se conserva un filtro de seguridad extra con
+    `_contact_id_de_opportunity`: si se puede identificar el contactId de
+    una Opportunity y NO coincide con `contact_id`, se descarta (nunca se
+    le muestra a un cliente una Opportunity de otro contacto). Si NO se
+    puede identificar el contactId (la respuesta trae una forma nueva,
+    todavía no cubierta), se confía en el filtro del servidor y se
+    conserva -- ya no se descarta a ciegas como antes, porque ahora sí hay
+    un filtro real del lado de GHL respaldándolo (antes era la ÚNICA
+    defensa, así que descartar en caso de duda era lo correcto).
 
     Ademas le adjunta a cada Opportunity el nombre legible de su etapa del
     pipeline (ver obtener_etapas_pipeline) bajo la clave "_etapa_nombre"
@@ -437,74 +460,48 @@ def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
         print(f"[opportunities] ADVERTENCIA: GHL_PIPELINE_COTIZACIONES_AUTOS_ID='{GHL_PIPELINE_COTIZACIONES_AUTOS_ID}' "
               "tiene espacios -- probablemente pusiste el NOMBRE del pipeline en vez de su ID. "
               "Sacalo del campo \"id\" de GET /opportunities/pipelines (ver obtener_etapas_pipeline).")
+    body = {
+        "locationId": GHL_LOCATION_ID,
+        "limit": 100,
+        "filters": [
+            {"field": "pipeline_id", "operator": "eq", "value": GHL_PIPELINE_COTIZACIONES_AUTOS_ID},
+            {"field": "contact_id", "operator": "eq", "value": contact_id},
+            {"field": "status", "operator": "eq", "value": status},
+        ],
+    }
     with httpx.Client(timeout=15) as client:
-        r = client.get(
+        r = client.post(
             f"{GHL_API_BASE}/opportunities/search",
-            params={
-                # snake_case -- CONFIRMADO EN VIVO contra la respuesta real de
-                # GHL (no contra la documentacion, que en este punto resulto
-                # estar mal/desactualizada para esta cuenta). Bug real
-                # detectado en vivo (segunda vuelta): la documentacion oficial
-                # (https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity)
-                # dice que estos params van en camelCase (locationId/
-                # pipelineId/contactId). Se probo asi y GHL devolvio 422 con
-                # el body: {"message":["property locationId should not
-                # exist","property pipelineId should not exist","property
-                # contactId should not exist","location_id must be a
-                # string","location_id should not be empty"], ...} -- es
-                # decir, el endpoint real para esta cuenta/version RECHAZA el
-                # camelCase y espera snake_case. Se revirtio a snake_case
-                # confiando en la respuesta real del servidor por encima de
-                # la doc.
-                #
-                # NOTA -- "contact_id" a proposito NO se manda como query
-                # param aqui (tercera vuelta, bug real detectado en vivo):
-                # con location_id + pipeline_id + status=open correctos Y
-                # contact_id de un contacto CONFIRMADO con una Opportunity
-                # abierta real en ese pipeline (se verifico contra la URL del
-                # contacto en GHL), la busqueda igual regresaba
-                # {"total": 0, ...} -- es decir, el filtro de contact_id de
-                # este endpoint no funciona de forma confiable combinado con
-                # pipeline_id para esta cuenta (posiblemente un bug del lado
-                # de GHL). Se dejo de mandar contact_id al servidor: se pide
-                # el pipeline completo (status=open o el status que aplique)
-                # y el filtro por contacto se hace 100% del lado de aqui (ver
-                # el filtro doble mas abajo, que antes era solo un resguardo
-                # y ahora es el filtro real).
-                "location_id": GHL_LOCATION_ID,
-                "pipeline_id": GHL_PIPELINE_COTIZACIONES_AUTOS_ID,
-                "status": status,
-            },
-            headers=_headers(),
+            json=body,
+            headers=_headers_busqueda_opportunities(),
         )
     if r.status_code >= 300:
         raise GHLError(f"GHL (buscar opportunities status={status}) respondio {r.status_code}: {r.text[:300]}")
     cuerpo = r.json()
     oportunidades = cuerpo.get("opportunities") or []
-    propias = [op for op in oportunidades if _contact_id_de_opportunity(op) == contact_id]
 
-    # Diagnostico -- a proposito, para el caso real "200 OK pero no regresa
-    # nada": esto deja claro EN EL LOG si (a) GHL de plano no encontro
-    # ninguna Opportunity en el pipeline con ese status (oportunidades=0,
-    # revisar location_id/pipeline_id/status en la cuenta), o (b) GHL SI
-    # encontro Opportunities del pipeline pero el filtro por contacto de
-    # aqui las descarto todas porque _contact_id_de_opportunity no reconoce
-    # el campo real que trae la respuesta (revisar ese helper con el
-    # ejemplo de "campos disponibles" que se imprime abajo).
-    if not oportunidades:
-        resto = {k: v for k, v in cuerpo.items() if k != "opportunities"}
-        print(f"[opportunities] status={status} contact_id={contact_id}: GHL regreso 0 Opportunities "
-              f"en total para location_id={GHL_LOCATION_ID} pipeline_id={GHL_PIPELINE_COTIZACIONES_AUTOS_ID} "
-              f"(sin filtrar por contacto todavia). resto de la respuesta: {resto}")
-        _diagnosticar_opportunities_vacio(status)
-    elif not propias:
-        print(f"[opportunities] status={status} contact_id={contact_id}: GHL regreso {len(oportunidades)} "
-              f"Opportunity(ies) del pipeline, pero NINGUNA quedo tras el filtro por contact_id -- revisa "
-              f"_contact_id_de_opportunity. Campos de la primera Opportunity recibida: "
-              f"{sorted(oportunidades[0].keys())} -- valor crudo: {oportunidades[0]}")
-    else:
-        print(f"[opportunities] status={status} contact_id={contact_id}: {len(propias)} de "
-              f"{len(oportunidades)} Opportunity(ies) del pipeline son de este contacto.")
+    propias = []
+    hubo_no_identificable = False
+    for op in oportunidades:
+        detectado = _contact_id_de_opportunity(op)
+        if detectado is None:
+            hubo_no_identificable = True
+        elif detectado != contact_id:
+            # Mismatch explicito -- no confiar, aunque el servidor ya
+            # filtro por contact_id (defensa en profundidad).
+            continue
+        propias.append(op)
+
+    if hubo_no_identificable:
+        print(f"[opportunities] status={status} contact_id={contact_id}: al menos una Opportunity de la "
+              f"respuesta no trae un contactId reconocible por _contact_id_de_opportunity -- se conservo de "
+              f"todas formas (el servidor ya filtro por contact_id). Revisa si la respuesta trae una forma "
+              f"nueva de identificar al contacto. Ejemplo (primera Opportunity): "
+              f"{sorted(oportunidades[0].keys()) if oportunidades else '(sin Opportunities)'}")
+
+    print(f"[opportunities] status={status} contact_id={contact_id}: {len(propias)} de "
+          f"{len(oportunidades)} Opportunity(ies) recibidas del pipeline conservadas tras el filtro de "
+          f"seguridad local.")
 
     try:
         etapas = obtener_etapas_pipeline(GHL_PIPELINE_COTIZACIONES_AUTOS_ID)
