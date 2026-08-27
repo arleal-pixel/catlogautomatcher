@@ -270,24 +270,45 @@ aviso.
 
 Variable de entorno necesaria:
 ```
-GHL_PIPELINE_COTIZACIONES_AUTOS_ID=<el id del pipeline "cotizaciones autos">
+GHL_PIPELINE_COTIZACIONES_AUTOS_ID=<el ID del pipeline "cotizaciones autos">
 ```
-Sácalo de `GET /opportunities/pipelines` en tu cuenta de GHL. Sin esta
-variable configurada, el comando sigue funcionando pero siempre responde
-"no tienes ninguna cotización abierta" (no truena, solo no tiene de dónde
-leer).
+Sácalo del campo **`id`** de `GET /opportunities/pipelines` en tu cuenta de
+GHL — **NO** el nombre que ves en el UI. Sin esta variable configurada, el
+comando sigue funcionando pero siempre responde "no tienes ninguna
+cotización abierta" (no truena, solo no tiene de dónde leer).
 
-**Filtro doble, a propósito (protección contra contacto equivocado):** como
-los nombres exactos de los query params de `GET /opportunities/search`
-(`contact_id` vs `contactId`) no están confirmados contra la cuenta real,
-`listar_cotizaciones_abiertas()` NO confía únicamente en que GHL filtre
-bien de su lado — vuelve a filtrar la respuesta comparando el contactId de
-cada Opportunity contra el contacto que preguntó, y descarta cualquier
-Opportunity donde no pueda determinar el contactId con certeza. Sin este
-segundo filtro, si el query param no aplicara (nombre equivocado, o GHL lo
-ignora), se le podrían mostrar a un cliente las cotizaciones abiertas de
-OTRO cliente — mismo riesgo de contacto equivocado que ya se descartó para
-el flujo de voz (ver `buscar_contact_id_por_telefono`).
+**Bug real detectado en vivo (ya corregido):** configurar esta variable
+con el NOMBRE del pipeline (ej. `Cotizaciones autos Segupoliza`) en vez de
+su ID hace que la búsqueda nunca encuentre nada — la request a GHL igual
+regresa `200 OK`, simplemente ningún pipeline tiene ese texto como `id`,
+así que el filtro no matchea nada. El bot ahora detecta este caso (los IDs
+de GHL no llevan espacios) y deja una advertencia clara en el log
+(`ADVERTENCIA: GHL_PIPELINE_COTIZACIONES_AUTOS_ID='...' tiene espacios`),
+pero de todas formas hay que corregir la variable con el ID real.
+
+**Bug real detectado en vivo (ya corregido) -- query params en snake_case:**
+la primera versión de `listar_cotizaciones_abiertas()`/`listar_polizas_activas()`
+mandaba `location_id`/`pipeline_id`/`contact_id` (snake_case) a
+`GET /opportunities/search`. Contra la
+[documentación oficial](https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity),
+esos params son **camelCase**: `locationId` (requerido), `pipelineId`,
+`contactId`, `status`. GHL ignoraba silenciosamente los params con el
+nombre equivocado — la request regresaba `200 OK` pero sin filtrar nada de
+verdad. Ya está corregido a camelCase.
+
+**Filtro doble, a propósito (protección contra contacto equivocado):**
+aunque el nombre del query param `contactId` ya está confirmado contra la
+documentación oficial, la forma EXACTA del campo dentro de cada Opportunity
+de la *respuesta* (`contactId` vs `contact_id` vs `contact.id` anidado) no
+se detalla ahí, así que `listar_cotizaciones_abiertas()` NO confía
+únicamente en que GHL filtre bien de su lado — vuelve a filtrar la
+respuesta comparando el contactId de cada Opportunity contra el contacto
+que preguntó, y descarta cualquier Opportunity donde no pueda determinar
+el contactId con certeza. Sin este segundo filtro, si por cualquier motivo
+el filtro del lado de GHL no aplicara, se le podrían mostrar a un cliente
+las cotizaciones abiertas de OTRO cliente — mismo riesgo de contacto
+equivocado que ya se descartó para el flujo de voz (ver
+`buscar_contact_id_por_telefono`).
 
 **Pendiente de confirmar en vivo** (mismo criterio que el resto del
 proyecto — no se le puso mucha fe a algo sin probarlo contra la cuenta

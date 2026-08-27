@@ -497,6 +497,34 @@ check(len(resultado_polizas) == 1 and resultado_polizas[0]["name"] == "HONDA CR-
       and resultado_polizas[0].get("_etapa_nombre") == "Oportunidad Ganada",
       f"la poliza activa se lista con su nombre y etapa (obtuvo {resultado_polizas})")
 
+# --- regresion: los query params de /opportunities/search son camelCase,
+# CONFIRMADO contra la doc oficial de GHL -- bug real detectado en vivo
+# donde se mandaban en snake_case y GHL simplemente los ignoraba (200 OK,
+# pero la busqueda nunca encontraba nada). ---
+check(set(_params_capturados[0].keys()) == {"locationId", "pipelineId", "contactId", "status"},
+      f"/opportunities/search se llama con los 4 params en camelCase, no snake_case "
+      f"(obtuvo {_params_capturados[0]})")
+check(_params_capturados[0]["contactId"] == "c-poliza", "contactId (camelCase) lleva el contact_id correcto")
+check(_params_capturados[0]["pipelineId"] == "pipeline-fake", "pipelineId (camelCase) lleva el pipeline correcto")
+
+# --- resguardo: GHL_PIPELINE_COTIZACIONES_AUTOS_ID con espacios (caso real
+# -- alguien puso el NOMBRE del pipeline en vez de su ID) no truena, solo
+# imprime una advertencia y sigue (la busqueda simplemente no encuentra
+# nada, como paso en la cuenta real). ---
+gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "Cotizaciones autos Segupoliza"  # nombre, NO id -- a proposito
+gb.httpx.Client = _ClientePolizasFalso
+_params_capturados.clear()
+try:
+    # se llama _buscar_opportunities_pipeline DIRECTO (no listar_cotizaciones_abiertas,
+    # que ya quedo monkeypatcheado por las pruebas de 'reiniciar' de arriba)
+    resultado_nombre_mal = gb._buscar_opportunities_pipeline("c-poliza", status="open")
+finally:
+    gb.httpx.Client = _httpx_original
+    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
+check(_params_capturados and _params_capturados[0]["pipelineId"] == "Cotizaciones autos Segupoliza",
+      f"con GHL_PIPELINE_COTIZACIONES_AUTOS_ID mal configurado (nombre en vez de id), NO truena -- solo "
+      f"advierte y manda ese valor tal cual (obtuvo params={_params_capturados})")
+
 # --- _formatear_polizas_activas ---
 texto_polizas_vacio = gb._formatear_polizas_activas([])
 check("no tienes ninguna póliza activa" in texto_polizas_vacio.lower(),

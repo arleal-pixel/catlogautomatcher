@@ -309,30 +309,41 @@ def listar_cotizaciones_abiertas(contact_id: str) -> List[dict]:
     de este lado, GHL/su workflow es quien administra ese pipeline cuando
     Segupoliza le manda el resultado real directo a GHL.
 
-    IMPORTANTE -- filtro doble, a propósito: se manda `contact_id` como
-    query param (para que GHL haga el filtro de su lado, más barato), PERO
-    ADEMÁS se vuelve a filtrar la respuesta aquí, comparando
+    IMPORTANTE -- filtro doble, a propósito: se manda `contactId` (camelCase,
+    CONFIRMADO contra la documentación oficial de GHL --
+    https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity)
+    como query param, para que GHL haga el filtro de su lado, más barato,
+    PERO ADEMÁS se vuelve a filtrar la respuesta aquí, comparando
     `_contact_id_de_opportunity(op) == contact_id` uno por uno. No es
-    redundancia -- es el resguardo real: los nombres exactos de los query
-    params de esta API (`contact_id` vs `contactId`, etc.) NO se han
-    confirmado todavía contra la cuenta real, así que si el filtro del
-    query param no aplica (nombre equivocado, o GHL simplemente lo
-    ignora), SIN este segundo filtro se le mostrarían a un cliente las
-    cotizaciones abiertas de OTRO cliente -- mismo tipo de riesgo de
-    contacto equivocado que ya se descartó para el flujo de voz (ver
-    buscar_contact_id_por_telefono). Cualquier Opportunity donde no se
-    pueda determinar el contactId con certeza se descarta también (mejor
-    no mostrarla que mostrarla mal).
+    redundancia -- es el resguardo real: aunque el nombre del query param ya
+    está confirmado, la forma EXACTA del campo dentro de cada Opportunity de
+    la respuesta (`contactId` vs `contact_id` vs `contact.id` anidado) no se
+    detalla en esa misma documentación, así que si por cualquier motivo el
+    filtro del lado de GHL no aplicara, SIN este segundo filtro se le
+    mostrarían a un cliente las cotizaciones abiertas de OTRO cliente --
+    mismo tipo de riesgo de contacto equivocado que ya se descartó para el
+    flujo de voz (ver buscar_contact_id_por_telefono). Cualquier Opportunity
+    donde no se pueda determinar el contactId con certeza se descarta
+    también (mejor no mostrarla que mostrarla mal).
 
     Sin GHL_PIPELINE_COTIZACIONES_AUTOS_ID configurado, devuelve [] de una
     vez (no truena) -- el bot simplemente no ofrece esta opción todavía.
+    OJO: esa variable tiene que ser el ID del pipeline (algo como
+    "b2G6yEywmZfoV0uSjjhF"), NO su nombre -- sácalo del campo "id" de
+    GET /opportunities/pipelines (ver obtener_etapas_pipeline más arriba),
+    no del nombre que se ve en el UI de GHL. Bug real detectado en vivo:
+    configurarlo con el NOMBRE del pipeline (ej. "Cotizaciones autos
+    Segupoliza") hace que la búsqueda no encuentre nada, aunque la request
+    regrese 200 OK -- simplemente ningún pipeline tiene ese texto como id.
 
-    NOTA: los nombres exactos de los query params (`contact_id` vs
-    `contactId`) y la forma exacta de cada Opportunity en la respuesta
-    siguen sin confirmarse en vivo -- si esto siempre devuelve vacío
-    aunque sepas que hay Opportunities abiertas para ese contacto, revisa
-    primero `_contact_id_de_opportunity` (puede que el campo real tenga
-    otro nombre que todavía no cubrimos)."""
+    NOTA: la forma exacta de cada Opportunity en la respuesta (`name`,
+    `monetaryValue`, `pipelineStageId`, y sobre todo cuál de
+    `contactId`/`contact_id`/`contact.id` trae de verdad) sigue sin
+    confirmarse en vivo -- si esto siempre devuelve vacío aunque sepas que
+    hay Opportunities abiertas para ese contacto Y ya verificaste que
+    GHL_PIPELINE_COTIZACIONES_AUTOS_ID es el ID (no el nombre) correcto,
+    revisa `_contact_id_de_opportunity` (puede que el campo real tenga otro
+    nombre que todavía no cubrimos)."""
     return _buscar_opportunities_pipeline(contact_id, status="open")
 
 
@@ -367,13 +378,30 @@ def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
     (el formateador ya sabe tratar eso como "sin etapa disponible")."""
     if not GHL_PIPELINE_COTIZACIONES_AUTOS_ID:
         return []
+    if " " in GHL_PIPELINE_COTIZACIONES_AUTOS_ID:
+        # Caso real confirmado: alguien puso el NOMBRE del pipeline (ej.
+        # "Cotizaciones autos Segupoliza") en vez de su ID -- la busqueda
+        # regresa 200 OK pero nunca encuentra nada, porque ningun pipeline
+        # tiene ese texto como id. Los IDs de GHL no llevan espacios, asi
+        # que esto es un resguardo barato para detectar el error rapido en
+        # los logs en vez de que se vea como "no tiene cotizaciones".
+        print(f"[opportunities] ADVERTENCIA: GHL_PIPELINE_COTIZACIONES_AUTOS_ID='{GHL_PIPELINE_COTIZACIONES_AUTOS_ID}' "
+              "tiene espacios -- probablemente pusiste el NOMBRE del pipeline en vez de su ID. "
+              "Sacalo del campo \"id\" de GET /opportunities/pipelines (ver obtener_etapas_pipeline).")
     with httpx.Client(timeout=15) as client:
         r = client.get(
             f"{GHL_API_BASE}/opportunities/search",
             params={
-                "location_id": GHL_LOCATION_ID,
-                "pipeline_id": GHL_PIPELINE_COTIZACIONES_AUTOS_ID,
-                "contact_id": contact_id,
+                # camelCase -- CONFIRMADO contra la documentacion oficial
+                # (https://marketplace.gohighlevel.com/docs/ghl/opportunities/search-opportunity),
+                # no snake_case. "locationId" es requerido segun esa misma
+                # doc. Bug real detectado en vivo: la primera version de
+                # este archivo mandaba snake_case (location_id/pipeline_id/
+                # contact_id), que GHL simplemente ignoraba -- la request
+                # regresaba 200 OK pero sin filtrar nada de verdad.
+                "locationId": GHL_LOCATION_ID,
+                "pipelineId": GHL_PIPELINE_COTIZACIONES_AUTOS_ID,
+                "contactId": contact_id,
                 "status": status,
             },
             headers=_headers(),
