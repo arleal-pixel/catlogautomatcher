@@ -418,8 +418,31 @@ def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
         )
     if r.status_code >= 300:
         raise GHLError(f"GHL (buscar opportunities status={status}) respondio {r.status_code}: {r.text[:300]}")
-    oportunidades = r.json().get("opportunities") or []
+    cuerpo = r.json()
+    oportunidades = cuerpo.get("opportunities") or []
     propias = [op for op in oportunidades if _contact_id_de_opportunity(op) == contact_id]
+
+    # Diagnostico -- a proposito, para el caso real "200 OK pero no regresa
+    # nada": esto deja claro EN EL LOG si (a) GHL de plano no encontro
+    # ninguna Opportunity con esos filtros (oportunidades=0, revisar
+    # location_id/pipeline_id/contact_id/status en la cuenta), o (b) GHL SI
+    # encontro Opportunities pero el filtro doble de aqui las descarto todas
+    # porque _contact_id_de_opportunity no reconoce el campo real que trae
+    # la respuesta (revisar ese helper con el ejemplo de "campos disponibles"
+    # que se imprime abajo).
+    if not oportunidades:
+        resto = {k: v for k, v in cuerpo.items() if k != "opportunities"}
+        print(f"[opportunities] status={status} contact_id={contact_id}: GHL regreso 0 Opportunities "
+              f"para location_id={GHL_LOCATION_ID} pipeline_id={GHL_PIPELINE_COTIZACIONES_AUTOS_ID}. "
+              f"resto de la respuesta: {resto}")
+    elif not propias:
+        print(f"[opportunities] status={status} contact_id={contact_id}: GHL regreso {len(oportunidades)} "
+              f"Opportunity(ies), pero NINGUNA quedo tras el filtro por contact_id -- revisa "
+              f"_contact_id_de_opportunity. Campos de la primera Opportunity recibida: "
+              f"{sorted(oportunidades[0].keys())} -- valor crudo: {oportunidades[0]}")
+    else:
+        print(f"[opportunities] status={status} contact_id={contact_id}: {len(propias)} de "
+              f"{len(oportunidades)} Opportunity(ies) son de este contacto.")
 
     try:
         etapas = obtener_etapas_pipeline(GHL_PIPELINE_COTIZACIONES_AUTOS_ID)
