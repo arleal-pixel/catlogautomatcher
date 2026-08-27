@@ -286,8 +286,8 @@ de GHL no llevan espacios) y deja una advertencia clara en el log
 (`ADVERTENCIA: GHL_PIPELINE_COTIZACIONES_AUTOS_ID='...' tiene espacios`),
 pero de todas formas hay que corregir la variable con el ID real.
 
-**Bug real detectado en vivo (dos vueltas -- la segunda con evidencia real
-del servidor, no de la doc):**
+**Bug real detectado en vivo (tres vueltas -- la segunda y tercera con
+evidencia real del servidor, no de la doc):**
 
 1ª vuelta: la primera versión de
 `listar_cotizaciones_abiertas()`/`listar_polizas_activas()` mandaba
@@ -312,19 +312,28 @@ la respuesta real del servidor por encima de lo que dice la documentación
 -- criterio que aplica para todo el proyecto: nunca se le pone más fe a la
 doc que a una prueba real contra la cuenta.
 
-**Filtro doble, a propósito (protección contra contacto equivocado):**
-aunque el nombre del query param `contact_id` ya está confirmado en vivo
-(no solo contra la doc), la forma EXACTA del campo dentro de cada
-Opportunity de la *respuesta* (`contactId` vs `contact_id` vs `contact.id`
-anidado) sigue sin confirmarse, así que `listar_cotizaciones_abiertas()` NO
-confía únicamente en que GHL filtre bien de su lado — vuelve a filtrar la
-respuesta comparando el contactId de cada Opportunity contra el contacto
-que preguntó, y descarta cualquier Opportunity donde no pueda determinar
-el contactId con certeza. Sin este segundo filtro, si por cualquier motivo
-el filtro del lado de GHL no aplicara, se le podrían mostrar a un cliente
-las cotizaciones abiertas de OTRO cliente — mismo riesgo de contacto
-equivocado que ya se descartó para el flujo de voz (ver
-`buscar_contact_id_por_telefono`).
+3ª vuelta (la más reveladora): ya con `location_id`/`pipeline_id` correctos
+y confirmados, se probó mandar además `contact_id` como query param, usando
+un contacto que se verificó de forma directa en GHL (se abrió su ficha y se
+confirmó su ID en la URL) que SÍ tenía una Opportunity abierta real en ese
+pipeline. Aun así, GHL respondió `{"total": 0, ...}` -- ninguna Opportunity
+encontrada. Es decir: el filtro por `contact_id` de este endpoint **no es
+confiable** para esta cuenta cuando se combina con `pipeline_id` (parece un
+bug del lado de GHL, no de casing ni de configuración). Se dejó de mandar
+`contact_id` al servidor por completo: ahora `_buscar_opportunities_pipeline`
+pide TODO el pipeline con el `status` que corresponda (sin filtrar por
+contacto del lado de GHL) y filtra la respuesta 100% aquí mismo.
+
+**Filtro por contacto, ahora 100% local (antes era solo un resguardo, ahora
+es el filtro real):** como GHL no filtra de forma confiable por
+`contact_id` combinado con `pipeline_id` (ver 3ª vuelta arriba),
+`listar_cotizaciones_abiertas()` pide todas las Opportunities del pipeline
+con el `status` pedido, y filtra la respuesta aquí comparando el
+`contactId` de cada Opportunity contra el contacto que preguntó
+(`_contact_id_de_opportunity`), descartando cualquier Opportunity donde no
+se pueda determinar el contactId con certeza -- mismo criterio de "mejor no
+mostrarla que mostrarla mal" que el resguardo de contacto equivocado del
+flujo de voz (ver `buscar_contact_id_por_telefono`).
 
 **Pendiente de confirmar en vivo** (mismo criterio que el resto del
 proyecto — no se le puso mucha fe a algo sin probarlo contra la cuenta
@@ -336,6 +345,10 @@ revisar (`_contact_id_de_opportunity` en `ghl_bridge.py`). También queda
 pendiente confirmar si `GET /opportunities/pipelines` (usado para mostrar
 el nombre de la etapa) tiene el mismo problema de casing -- no hay
 evidencia todavía de que falle, pero tampoco se ha confirmado en vivo.
+Y si el pipeline llega a crecer mucho (cientos de Opportunities abiertas a
+la vez), pedir todo el pipeline sin filtrar por contacto del lado de GHL
+puede volverse más lento -- por ahora el volumen de este bot no lo
+justifica, pero es lo primero a revisar si esto se siente lento algún día.
 
 ### Pólizas activas (comando "pólizas activas")
 

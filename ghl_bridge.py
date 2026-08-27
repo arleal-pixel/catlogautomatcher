@@ -309,24 +309,23 @@ def listar_cotizaciones_abiertas(contact_id: str) -> List[dict]:
     de este lado, GHL/su workflow es quien administra ese pipeline cuando
     Segupoliza le manda el resultado real directo a GHL.
 
-    IMPORTANTE -- filtro doble, a propósito: se manda `contact_id` (snake_case
-    -- CONFIRMADO EN VIVO contra la respuesta real de GHL, NO contra la
-    documentación oficial: esa doc dice camelCase, pero para esta cuenta el
-    servidor rechaza camelCase con 422 y pide snake_case explícitamente, ver
-    nota completa junto al request en `_buscar_opportunities_pipeline`) como
-    query param, para que GHL haga el filtro de su lado, más barato, PERO
-    ADEMÁS se vuelve a filtrar la respuesta aquí, comparando
-    `_contact_id_de_opportunity(op) == contact_id` uno por uno. No es
-    redundancia -- es el resguardo real: aunque el nombre del query param ya
-    está confirmado en vivo, la forma EXACTA del campo dentro de cada
-    Opportunity de la respuesta (`contactId` vs `contact_id` vs `contact.id`
-    anidado) sigue sin confirmarse, así que si por cualquier motivo el filtro
-    del lado de GHL no aplicara, SIN este segundo filtro se le mostrarían a
-    un cliente las cotizaciones abiertas de OTRO cliente -- mismo tipo de
-    riesgo de contacto equivocado que ya se descartó para el flujo de voz
-    (ver buscar_contact_id_por_telefono). Cualquier Opportunity donde no se
-    pueda determinar el contactId con certeza se descarta también (mejor no
-    mostrarla que mostrarla mal).
+    IMPORTANTE -- el filtro por contacto se hace 100% AQUÍ, no en GHL (bug
+    real detectado en vivo, tercera vuelta): se probó mandar `contact_id`
+    como query param a `/opportunities/search` (snake_case, confirmado
+    contra la respuesta real -- ver nota completa junto al request en
+    `_buscar_opportunities_pipeline`), CON un contacto que se verificó tenía
+    una Opportunity abierta real en el pipeline correcto (se confirmó el ID
+    del contacto directo desde la URL de su ficha en GHL) -- y aun así GHL
+    regresaba `{"total": 0, ...}`. Es decir, filtrar por `contact_id` en este
+    endpoint no es confiable para esta cuenta cuando se combina con
+    `pipeline_id`. Por eso `_buscar_opportunities_pipeline` YA NO manda
+    `contact_id` al servidor: pide TODO el pipeline con el `status` que
+    corresponda, y filtra la respuesta aquí mismo, comparando
+    `_contact_id_de_opportunity(op) == contact_id` uno por uno. Cualquier
+    Opportunity donde no se pueda determinar el contactId con certeza se
+    descarta también (mejor no mostrarla que mostrarla mal, mismo criterio
+    que el resguardo de contacto equivocado del flujo de voz -- ver
+    buscar_contact_id_por_telefono).
 
     Sin GHL_PIPELINE_COTIZACIONES_AUTOS_ID configurado, devuelve [] de una
     vez (no truena) -- el bot simplemente no ofrece esta opción todavía.
@@ -409,9 +408,23 @@ def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
                 # camelCase y espera snake_case. Se revirtio a snake_case
                 # confiando en la respuesta real del servidor por encima de
                 # la doc.
+                #
+                # NOTA -- "contact_id" a proposito NO se manda como query
+                # param aqui (tercera vuelta, bug real detectado en vivo):
+                # con location_id + pipeline_id + status=open correctos Y
+                # contact_id de un contacto CONFIRMADO con una Opportunity
+                # abierta real en ese pipeline (se verifico contra la URL del
+                # contacto en GHL), la busqueda igual regresaba
+                # {"total": 0, ...} -- es decir, el filtro de contact_id de
+                # este endpoint no funciona de forma confiable combinado con
+                # pipeline_id para esta cuenta (posiblemente un bug del lado
+                # de GHL). Se dejo de mandar contact_id al servidor: se pide
+                # el pipeline completo (status=open o el status que aplique)
+                # y el filtro por contacto se hace 100% del lado de aqui (ver
+                # el filtro doble mas abajo, que antes era solo un resguardo
+                # y ahora es el filtro real).
                 "location_id": GHL_LOCATION_ID,
                 "pipeline_id": GHL_PIPELINE_COTIZACIONES_AUTOS_ID,
-                "contact_id": contact_id,
                 "status": status,
             },
             headers=_headers(),
@@ -424,25 +437,25 @@ def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
 
     # Diagnostico -- a proposito, para el caso real "200 OK pero no regresa
     # nada": esto deja claro EN EL LOG si (a) GHL de plano no encontro
-    # ninguna Opportunity con esos filtros (oportunidades=0, revisar
-    # location_id/pipeline_id/contact_id/status en la cuenta), o (b) GHL SI
-    # encontro Opportunities pero el filtro doble de aqui las descarto todas
-    # porque _contact_id_de_opportunity no reconoce el campo real que trae
-    # la respuesta (revisar ese helper con el ejemplo de "campos disponibles"
-    # que se imprime abajo).
+    # ninguna Opportunity en el pipeline con ese status (oportunidades=0,
+    # revisar location_id/pipeline_id/status en la cuenta), o (b) GHL SI
+    # encontro Opportunities del pipeline pero el filtro por contacto de
+    # aqui las descarto todas porque _contact_id_de_opportunity no reconoce
+    # el campo real que trae la respuesta (revisar ese helper con el
+    # ejemplo de "campos disponibles" que se imprime abajo).
     if not oportunidades:
         resto = {k: v for k, v in cuerpo.items() if k != "opportunities"}
         print(f"[opportunities] status={status} contact_id={contact_id}: GHL regreso 0 Opportunities "
-              f"para location_id={GHL_LOCATION_ID} pipeline_id={GHL_PIPELINE_COTIZACIONES_AUTOS_ID}. "
-              f"resto de la respuesta: {resto}")
+              f"en total para location_id={GHL_LOCATION_ID} pipeline_id={GHL_PIPELINE_COTIZACIONES_AUTOS_ID} "
+              f"(sin filtrar por contacto todavia). resto de la respuesta: {resto}")
     elif not propias:
         print(f"[opportunities] status={status} contact_id={contact_id}: GHL regreso {len(oportunidades)} "
-              f"Opportunity(ies), pero NINGUNA quedo tras el filtro por contact_id -- revisa "
+              f"Opportunity(ies) del pipeline, pero NINGUNA quedo tras el filtro por contact_id -- revisa "
               f"_contact_id_de_opportunity. Campos de la primera Opportunity recibida: "
               f"{sorted(oportunidades[0].keys())} -- valor crudo: {oportunidades[0]}")
     else:
         print(f"[opportunities] status={status} contact_id={contact_id}: {len(propias)} de "
-              f"{len(oportunidades)} Opportunity(ies) son de este contacto.")
+              f"{len(oportunidades)} Opportunity(ies) del pipeline son de este contacto.")
 
     try:
         etapas = obtener_etapas_pipeline(GHL_PIPELINE_COTIZACIONES_AUTOS_ID)

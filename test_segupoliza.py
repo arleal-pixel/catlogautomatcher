@@ -503,11 +503,18 @@ check(len(resultado_polizas) == 1 and resultado_polizas[0]["name"] == "HONDA CR-
 # "property locationId should not exist" + "location_id must be a string"
 # cuando se probo camelCase. Se revirtio a snake_case confiando en la
 # respuesta real del servidor por encima de la doc. ---
-check(set(_params_capturados[0].keys()) == {"location_id", "pipeline_id", "contact_id", "status"},
-      f"/opportunities/search se llama con los 4 params en snake_case, no camelCase "
+check(set(_params_capturados[0].keys()) == {"location_id", "pipeline_id", "status"},
+      f"/opportunities/search se llama con location_id/pipeline_id/status en snake_case "
       f"(obtuvo {_params_capturados[0]})")
-check(_params_capturados[0]["contact_id"] == "c-poliza", "contact_id (snake_case) lleva el contact_id correcto")
 check(_params_capturados[0]["pipeline_id"] == "pipeline-fake", "pipeline_id (snake_case) lleva el pipeline correcto")
+
+# --- regresion: contact_id NO se manda como query param al servidor (bug
+# real detectado en vivo, tercera vuelta -- ver nota en
+# _buscar_opportunities_pipeline). El filtro por contacto ahora es 100%
+# local, comparando cada Opportunity via _contact_id_de_opportunity. ---
+check("contact_id" not in _params_capturados[0],
+      f"contact_id NO se manda a GHL como query param -- el filtro es local "
+      f"(obtuvo {_params_capturados[0]})")
 
 # --- resguardo: GHL_PIPELINE_COTIZACIONES_AUTOS_ID con espacios (caso real
 # -- alguien puso el NOMBRE del pipeline en vez de su ID) no truena, solo
