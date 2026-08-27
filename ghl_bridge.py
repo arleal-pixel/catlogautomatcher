@@ -363,6 +363,54 @@ def listar_polizas_activas(contact_id: str) -> List[dict]:
     return _buscar_opportunities_pipeline(contact_id, status=GHL_STATUS_POLIZA_ACTIVA)
 
 
+def _diagnosticar_opportunities_vacio(status: str) -> None:
+    """SOLO diagnostico -- se llama unicamente cuando _buscar_opportunities_pipeline
+    ya regreso 0 Opportunities, para ayudar a distinguir EN EL LOG entre 3
+    causas posibles sin necesitar otra ronda de pruebas en vivo:
+
+    1. location_id solo (sin pipeline_id ni status) -- si esto tambien da 0,
+       el problema es de location_id/autenticacion, no del pipeline.
+    2. location_id + pipeline_id (sin status) -- si esto SI trae resultados
+       pero la busqueda con status=... daba 0, el problema es el filtro de
+       `status` (puede que el valor real en la cuenta no sea "open"/"won"
+       en minusculas, o que el query param de status tenga otro nombre).
+    3. Si ni siquiera location_id+pipeline_id (sin status) trae nada, el
+       problema esta en pipeline_id -- revisa que sea el ID correcto (sacado
+       de la URL de GHL al entrar al pipeline, tab "Stages").
+
+    Nunca truena ni cambia el resultado que ya se le va a mostrar al
+    cliente -- son 2 GETs extra de solo lectura, con try/except silencioso
+    si algo sale mal (mejor no diagnosticar que romper el flujo normal)."""
+    try:
+        with httpx.Client(timeout=10) as client:
+            r_pipeline = client.get(
+                f"{GHL_API_BASE}/opportunities/search",
+                params={"location_id": GHL_LOCATION_ID, "pipeline_id": GHL_PIPELINE_COTIZACIONES_AUTOS_ID},
+                headers=_headers(),
+            )
+        n_pipeline = len((r_pipeline.json().get("opportunities") or [])) if r_pipeline.status_code < 300 else None
+        print(f"[opportunities][diagnostico] location_id+pipeline_id SIN status: "
+              f"{'status ' + str(r_pipeline.status_code) if n_pipeline is None else str(n_pipeline) + ' Opportunity(ies)'} "
+              f"-- si esto es >0 pero status='{status}' dio 0, el filtro de 'status' es el sospechoso.")
+    except Exception as e:
+        print(f"[opportunities][diagnostico] fallo probando sin status: {e}")
+
+    try:
+        with httpx.Client(timeout=10) as client:
+            r_location = client.get(
+                f"{GHL_API_BASE}/opportunities/search",
+                params={"location_id": GHL_LOCATION_ID},
+                headers=_headers(),
+            )
+        n_location = len((r_location.json().get("opportunities") or [])) if r_location.status_code < 300 else None
+        print(f"[opportunities][diagnostico] SOLO location_id (sin pipeline_id ni status): "
+              f"{'status ' + str(r_location.status_code) if n_location is None else str(n_location) + ' Opportunity(ies)'} "
+              f"-- si esto es 0, el problema es location_id/autenticacion, no el pipeline. Si es >0 pero lo "
+              f"de arriba (con pipeline_id) dio 0, el pipeline_id es el sospechoso.")
+    except Exception as e:
+        print(f"[opportunities][diagnostico] fallo probando solo location_id: {e}")
+
+
 def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
     """Logica compartida entre listar_cotizaciones_abiertas (status="open")
     y listar_polizas_activas (status=GHL_STATUS_POLIZA_ACTIVA) -- misma
@@ -448,6 +496,7 @@ def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
         print(f"[opportunities] status={status} contact_id={contact_id}: GHL regreso 0 Opportunities "
               f"en total para location_id={GHL_LOCATION_ID} pipeline_id={GHL_PIPELINE_COTIZACIONES_AUTOS_ID} "
               f"(sin filtrar por contacto todavia). resto de la respuesta: {resto}")
+        _diagnosticar_opportunities_vacio(status)
     elif not propias:
         print(f"[opportunities] status={status} contact_id={contact_id}: GHL regreso {len(oportunidades)} "
               f"Opportunity(ies) del pipeline, pero NINGUNA quedo tras el filtro por contact_id -- revisa "

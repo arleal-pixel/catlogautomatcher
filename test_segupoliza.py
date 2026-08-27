@@ -291,6 +291,7 @@ class _ClienteFalso:
 gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
 gb.GHL_API_TOKEN = "fake-token"
 _httpx_original = gb.httpx.Client
+_diagnosticar_opportunities_vacio_real = gb._diagnosticar_opportunities_vacio
 gb.httpx.Client = _ClienteFalso
 try:
     resultado_filtro = gb.listar_cotizaciones_abiertas("c1")
@@ -533,6 +534,87 @@ finally:
 check(_params_capturados and _params_capturados[0]["pipeline_id"] == "Cotizaciones autos Segupoliza",
       f"con GHL_PIPELINE_COTIZACIONES_AUTOS_ID mal configurado (nombre en vez de id), NO truena -- solo "
       f"advierte y manda ese valor tal cual (obtuvo params={_params_capturados})")
+
+# --- _diagnosticar_opportunities_vacio: 2 GETs extra de solo lectura cuando
+# la busqueda principal da 0, para distinguir en el log si el sospechoso es
+# el status, el pipeline_id, o location_id/autenticacion -- nunca truena ni
+# cambia el resultado que ya se le muestra al cliente. ---
+_params_diag = []
+class _RespuestaDiagConDatos:
+    status_code = 200
+    def json(self):
+        return {"opportunities": [{"name": "algo"}, {"name": "otra"}]}
+
+class _RespuestaDiagVacia:
+    status_code = 200
+    def json(self):
+        return {"opportunities": []}
+
+class _ClienteDiagFalso:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def get(self, url, params=None, **k):
+        _params_diag.append(dict(params or {}))
+        # con pipeline_id -> si trae datos; solo location_id -> tambien trae datos
+        return _RespuestaDiagConDatos()
+
+gb.GHL_LOCATION_ID = "loc-diag"
+gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-diag"
+gb.httpx.Client = _ClienteDiagFalso
+try:
+    gb._diagnosticar_opportunities_vacio("open")
+finally:
+    gb.httpx.Client = _httpx_original
+    gb.GHL_LOCATION_ID = None
+    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
+
+check(len(_params_diag) == 2, f"hace exactamente 2 GETs de diagnostico (obtuvo {len(_params_diag)})")
+check(set(_params_diag[0].keys()) == {"location_id", "pipeline_id"} and "status" not in _params_diag[0],
+      f"el primer GET manda location_id+pipeline_id SIN status (obtuvo {_params_diag[0]})")
+check(set(_params_diag[1].keys()) == {"location_id"},
+      f"el segundo GET manda SOLO location_id (obtuvo {_params_diag[1]})")
+
+# --- no truena si las llamadas de diagnostico fallan (red, 500, etc.) ---
+class _ClienteDiagQueTruena:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def get(self, url, params=None, **k):
+        raise RuntimeError("simulado: fallo de red")
+
+gb.GHL_LOCATION_ID = "loc-diag"
+gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-diag"
+gb.httpx.Client = _ClienteDiagQueTruena
+try:
+    gb._diagnosticar_opportunities_vacio("open")  # no debe tronar
+    diag_no_tronó = True
+except Exception:
+    diag_no_tronó = False
+finally:
+    gb.httpx.Client = _httpx_original
+    gb.GHL_LOCATION_ID = None
+    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
+check(diag_no_tronó, "si las llamadas de diagnostico fallan (ej. red), NO truena -- solo se pierde el diagnostico")
+
+# --- _diagnosticar_opportunities_vacio se dispara automaticamente cuando la
+# busqueda principal da 0 (integrado con _buscar_opportunities_pipeline) ---
+_diag_llamado = []
+gb._diagnosticar_opportunities_vacio = lambda status: _diag_llamado.append(status)
+gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
+gb.httpx.Client = _ClientePolizasFalso  # ya definida arriba, regresa 1 Opportunity de OTRO contacto
+_params_capturados.clear()
+try:
+    gb._buscar_opportunities_pipeline("contacto-que-no-existe", status="open")
+finally:
+    gb.httpx.Client = _httpx_original
+    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
+# _ClientePolizasFalso SI regresa una Opportunity (solo que de otro contacto),
+# asi que oportunidades no queda vacio -- el diagnostico NO deberia dispararse
+# en ese caso (solo se dispara cuando GHL regresa 0 Opportunities en total,
+# no cuando el filtro por contacto descarta las que si trajo).
+check(_diag_llamado == [], "el diagnostico NO se dispara si GHL SI trajo Opportunities (aunque sean de otro contacto)")
+gb._diagnosticar_opportunities_vacio = _diagnosticar_opportunities_vacio_real
 
 # --- _formatear_polizas_activas ---
 texto_polizas_vacio = gb._formatear_polizas_activas([])
