@@ -183,6 +183,124 @@ Nuestra respuesta a Segupoliza:
 conversación activa con ese teléfono (o que el payload no traía teléfono
 utilizable) — revisa los logs (busca `[segupoliza-webhook]`).
 
+## 3. Status intermedio de cotización (CONFIRMADO con Segupoliza)
+
+**Para qué sirve:** el paso 1 (recibir la solicitud) y el paso 2 (resultado
+final) pueden tardar varios minutos entre sí. Mientras tanto, si el cliente
+pregunta "¿cómo va mi cotización?", antes no teníamos nada que contestarle
+más que "espérate". Segupoliza confirmó que puede mandar **varios webhooks
+de status intermedios** mientras cotiza, para que podamos avisarle al
+cliente en tiempo real qué está pasando.
+
+**Cómo se correlaciona (a diferencia del resultado final):** el resultado
+final (sección 2) no trae ningún id confiable — solo se puede correlacionar
+por teléfono. Este mecanismo de status SÍ tiene un id confiable: nosotros le
+mandamos a Segupoliza un campo `followupid` en la solicitud del paso 1 (ver
+`segupoliza_client.armar_payload` — es el `id` del registro del Custom
+Object que ya creamos en GHL para esa cotización, `REGISTROS_ACTIVOS` en
+`ghl_bridge.py`), y Segupoliza nos lo tiene que regresar TAL CUAL en cada
+webhook de status que mande. Así podemos guardar/consultar el status sin
+depender del teléfono.
+
+### 3.1 Nosotros le mandamos `followupid` a Segupoliza (paso 1, actualizado)
+
+El body de `POST https://webapi.segupoliza.com/api/v1/quotes/vehicle` (ver
+sección 1 arriba) ahora incluye un campo extra:
+
+```json
+{
+  "Name": "Gerardo",
+  "...": "... (resto de los campos igual que antes) ...",
+  "followupid": "abc123XYZ"
+}
+```
+
+Si por alguna razón no se pudo crear el registro en GHL antes de mandar la
+cotización (poco común, ver `_finalizar_datos_conductor` en
+`ghl_bridge.py`), simplemente no se manda `followupid` — la cotización
+sigue su curso normal, solo que esa en particular no va a poder mostrar
+status intermedios en vivo (sigue funcionando igual que hasta ahora, sin
+status).
+
+### 3.2 Segupoliza nos manda el status (webhook, MISMA URL que el resultado final)
+
+`POST /cotizador-auto/webhook` — el mismo endpoint que ya existe, NO una URL
+nueva. Se distingue automáticamente de los otros dos contratos porque es el
+único que trae `followupid`.
+
+Body esperado:
+```json
+{
+  "followupid": "abc123XYZ",
+  "status": "cotizando_aseguradoras"
+}
+```
+
+- `followupid`: el mismo valor que le mandamos en el paso 1 (sección 3.1).
+  Nombres de campo alternativos también aceptados, por si el lado de
+  Segupoliza usa otra convención de mayúsculas/guiones bajos: `followUpId`,
+  `followup_id`, `FollowupId`, `FollowUpId`.
+- El texto del status puede ir en cualquiera de estas claves (se revisan en
+  este orden): `status`, `mensaje`, `texto`, `estado`.
+
+**5 códigos de status sugeridos** (para que sea fácil integrarlo del lado de
+Segupoliza, aunque no es obligatorio usar exactamente estos — ver más
+abajo): manda cualquiera de estos 5 códigos (como texto, no importa
+mayúsculas/espacios/guiones bajos — se normalizan antes de compararlos) y el
+bot lo traduce automáticamente a un mensaje en español ya redactado para el
+cliente:
+
+| Código que manda Segupoliza   | Mensaje que recibe el cliente por WhatsApp                          |
+|--------------------------------|-----------------------------------------------------------------------|
+| `recibido`                     | Recibimos tu solicitud de cotización.                                |
+| `iniciando_cotizacion`          | Estamos iniciando tu cotización.                                     |
+| `cotizando_aseguradoras`        | Estamos cotizando con las aseguradoras.                              |
+| `buscando_mejor_oferta`         | Estamos buscando la mejor oferta para ti.                            |
+| `generando_pdf`                 | Ya casi está: estamos generando el PDF de tu cotización.             |
+
+Esta lista vive en `ghl_bridge.ESTADOS_PROCESO_COTIZACION` (un diccionario
+simple `codigo -> texto`) — si más adelante Segupoliza quiere agregar o
+renombrar códigos, basta con editar ese diccionario, no hace falta tocar
+nada más del flujo.
+
+**Si Segupoliza manda un código que NO está en esa lista de 5** (por
+ejemplo, porque agregaron un paso nuevo que no anticipamos), el bot NO lo
+rechaza ni truena — usa el texto tal cual se lo mandaron, sin traducir. Esto
+es a propósito: no queremos bloquear a Segupoliza si su proceso interno
+cambia: pueden mandar directamente el texto en español que quieren que vea
+el cliente en vez de uno de los 5 códigos, y funciona igual.
+
+Se puede mandar este webhook **las veces que haga falta** mientras dura la
+cotización (por ejemplo, una vez por cada uno de los 5 pasos de arriba) —
+cada llamada simplemente actualiza el status guardado para ese
+`followupid`, pisando el anterior.
+
+Nuestra respuesta a Segupoliza:
+```json
+{"ok": true, "followup_id": "abc123XYZ", "error": null}
+```
+`ok: false` significa que falta `followupid` o el texto de status en el
+payload — revisa los logs (busca `[segupoliza-status]`).
+
+### 3.3 Cómo lo usa el bot
+
+- Si el cliente pregunta por su cotización (comando "cotizaciones abiertas",
+  ver sección "Modo Segupoliza → GHL directo" más abajo) y **todavía no
+  existe la Opportunity en GHL** (porque Segupoliza sigue trabajando), el
+  bot le contesta con el último status intermedio recibido en vez de "no
+  tienes ninguna cotización abierta".
+- Mientras el contacto está en fase `esperando_cotizacion` (esperando el
+  resultado) y escribe cualquier otra cosa, el mensaje de "todavía estamos
+  calculando tu cotización" ahora incluye el último status intermedio, si ya
+  llegó alguno.
+- Una vez que la Opportunity ya existe en GHL (resultado final ya
+  procesado), este mecanismo deja de usarse — se usa el status real de GHL
+  (pipeline stage), como ya funcionaba antes.
+- Guardado: en memoria (`ghl_bridge.ESTADOS_COTIZACION_EN_PROCESO`, dict
+  `followup_id -> {texto, codigo, actualizado}`), mismo patrón y misma
+  limitación POC que `CONVERSACIONES`/`REGISTROS_ACTIVOS` (se pierde si el
+  proceso se reinicia) — ver README "Limitaciones (POC)".
+
 ## Variables de entorno (Railway)
 
 ```

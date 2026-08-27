@@ -202,7 +202,7 @@ def _limpiar_telefono(telefono: Optional[str]) -> str:
     return f"+{solo_digitos}" if tiene_mas else solo_digitos
 
 
-def armar_payload(vehiculo: dict, datos_conductor: dict) -> dict:
+def armar_payload(vehiculo: dict, datos_conductor: dict, followup_id: Optional[str] = None) -> dict:
     """Arma el body exacto que espera Segupoliza a partir de nuestras
     estructuras internas (vehiculo: clave/marca/descripcion/anio;
     datos_conductor: nombre/edad/codigo_postal/correo/telefono).
@@ -226,14 +226,28 @@ def armar_payload(vehiculo: dict, datos_conductor: dict) -> dict:
       (flujos viejos/editar_uno que nunca pasaron por ese paso) se intenta
       inferir_genero_o_none() y, si tampoco eso resuelve nada, el fallback
       determinista inferir_genero() -- Segupoliza requiere este campo, asi
-      que siempre se manda algo."""
+      que siempre se manda algo.
+    - followupid = followup_id, CONFIRMADO con Segupoliza (ver
+      COTIZADOR_AUTO_CONTRATO.md, seccion "Status intermedio de la
+      cotizacion"): el mismo id que le mandamos aqui es el que Segupoliza
+      va a regresar en cada webhook de status intermedio mientras procesa
+      la cotizacion (recibido / cotizando aseguradoras / etc.), asi que
+      podemos correlacionarlo de vuelta con la conversacion sin depender
+      del telefono (a diferencia del webhook de RESULTADO FINAL, que ese
+      si confirmamos que NO trae ningun id confiable -- ver
+      recibir_resultado_cotizacion_segupoliza en ghl_bridge.py). Se manda
+      SOLO si followup_id viene (no se manda la llave con valor vacio) --
+      si por lo que sea no hay id disponible (ej. fallo guardar el
+      registro en GHL antes de llegar aqui), simplemente no vamos a poder
+      correlacionar los status intermedios de esa cotizacion en particular,
+      pero la cotizacion en si sigue su curso normal."""
     nombre_completo = datos_conductor.get("nombre") or ""
     nombre, apellido_paterno, apellido_materno = dividir_nombre(nombre_completo)
     genero = (datos_conductor.get("genero")
               or inferir_genero_o_none(nombre_completo)
               or inferir_genero(nombre_completo))
 
-    return {
+    payload = {
         "Name": nombre,
         "FatherLastName": apellido_paterno or ".",
         "MotherLastName": apellido_materno or ".",
@@ -245,18 +259,26 @@ def armar_payload(vehiculo: dict, datos_conductor: dict) -> dict:
         "VehicleCode": vehiculo.get("clave") or "",
         "Year": str(vehiculo.get("anio") or ""),
     }
+    if followup_id:
+        payload["followupid"] = str(followup_id)
+    return payload
 
 
-def enviar_cotizacion(vehiculo: dict, datos_conductor: dict) -> dict:
+def enviar_cotizacion(vehiculo: dict, datos_conductor: dict, followup_id: Optional[str] = None) -> dict:
     """POST a Segupoliza -- SINCRONO (el caller decide si correrlo en un
     hilo aparte, ver enviar_a_cotizar() en ghl_bridge.py). Devuelve la
     respuesta inmediata tal cual (formato de acuse todavia no confirmado
     contra una respuesta real -- se guarda/loggea tal cual llegue).
 
+    "followup_id" (opcional) se manda como "followupid" en el body -- ver
+    armar_payload() para el detalle completo de por que es importante
+    (correlacion de los webhooks de status intermedio, ver
+    COTIZADOR_AUTO_CONTRATO.md).
+
     Lanza SegupolizaError si falta configuracion o si Segupoliza responde
     con un status >= 300 (revisa el mensaje -- puede traer detalle de que
     campo vino mal, ej. VehicleCode que no existe)."""
-    payload = armar_payload(vehiculo, datos_conductor)
+    payload = armar_payload(vehiculo, datos_conductor, followup_id=followup_id)
     with httpx.Client(timeout=20) as client:
         r = client.post(SEGUPOLIZA_URL, json=payload, headers=_headers())
     if r.status_code >= 300:

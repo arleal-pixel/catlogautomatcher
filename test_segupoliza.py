@@ -132,8 +132,8 @@ check(gb.enviar_a_cotizar("c1", {}, {}) is False,
 
 # --- enviar_a_cotizar: con SEGUPOLIZA_TOKEN, dispara en hilo y devuelve True ---
 llamadas_segupoliza = []
-def _fake_enviar_cotizacion(vehiculo, datos_conductor):
-    llamadas_segupoliza.append((vehiculo, datos_conductor))
+def _fake_enviar_cotizacion(vehiculo, datos_conductor, followup_id=None):
+    llamadas_segupoliza.append((vehiculo, datos_conductor, followup_id))
     return {"ok": True}
 gb.segupoliza.enviar_cotizacion = _fake_enviar_cotizacion
 gb.segupoliza.SEGUPOLIZA_TOKEN = "fake-token-de-prueba"
@@ -143,6 +143,16 @@ import time
 time.sleep(0.2)  # el envio real ocurre en un hilo aparte (fire-and-forget)
 check(len(llamadas_segupoliza) == 1 and llamadas_segupoliza[0][0] == {"clave": "X"},
       f"enviar_a_cotizar SI llamo a segupoliza.enviar_cotizacion con el vehiculo correcto (obtuvo {llamadas_segupoliza})")
+check(llamadas_segupoliza[0][2] is None,
+      f"enviar_a_cotizar sin pasarle followup_id explicito lo manda como None (obtuvo {llamadas_segupoliza[0][2]!r})")
+
+# --- enviar_a_cotizar: con followup_id explicito, se lo pasa tal cual a segupoliza.enviar_cotizacion ---
+llamadas_segupoliza.clear()
+resultado_enviar_followup = gb.enviar_a_cotizar("c2b", {"clave": "Y"}, {"nombre": "Ana"}, followup_id="rec-xyz")
+check(resultado_enviar_followup is True, "enviar_a_cotizar con followup_id sigue devolviendo True")
+time.sleep(0.2)
+check(len(llamadas_segupoliza) == 1 and llamadas_segupoliza[0][2] == "rec-xyz",
+      f"enviar_a_cotizar pasa el followup_id recibido a segupoliza.enviar_cotizacion (obtuvo {llamadas_segupoliza})")
 gb.segupoliza.SEGUPOLIZA_TOKEN = None  # deja el mock neutro para el resto de pruebas
 
 # --- _finalizar_datos_conductor inyecta el telefono capturado en TELEFONOS ---
@@ -158,6 +168,35 @@ conv = {"vehiculo": {"clave": "X"}, "datos": {"nombre": "Juan", "edad": 30, "cod
 gb._finalizar_datos_conductor("c3", conv)
 check(conv["datos"].get("telefono") == "+523330079224",
       f"_finalizar_datos_conductor agrega el telefono capturado a los datos del conductor (obtuvo {conv['datos']})")
+
+# --- _finalizar_datos_conductor manda el record_id de GHL como followup_id a enviar_a_cotizar ---
+gb.CONVERSACIONES.clear()
+gb.TELEFONOS.clear()
+gb.REGISTROS_ACTIVOS.clear()
+gb.crear_registro_cotizacion = lambda *a, **k: "rec-followup-test"
+_llamadas_enviar_a_cotizar = []
+gb.enviar_a_cotizar = lambda *a, **k: _llamadas_enviar_a_cotizar.append(k.get("followup_id")) or False
+gb.TELEFONOS["c3b"] = "+523330079224"
+conv_followup = {"vehiculo": {"clave": "X"}, "datos": {"nombre": "Juan", "edad": 30, "codigo_postal": "01000",
+                                                         "correo": "juan@ejemplo.com"}}
+gb._finalizar_datos_conductor("c3b", conv_followup)
+check(gb.REGISTROS_ACTIVOS.get("c3b") == "rec-followup-test",
+      f"_finalizar_datos_conductor guarda el record_id en REGISTROS_ACTIVOS (obtuvo {gb.REGISTROS_ACTIVOS.get('c3b')})")
+check(_llamadas_enviar_a_cotizar == ["rec-followup-test"],
+      f"_finalizar_datos_conductor manda el record_id como followup_id a enviar_a_cotizar (obtuvo {_llamadas_enviar_a_cotizar})")
+
+# si crear_registro_cotizacion falla (record_id None), se manda sin followup_id -- no truena
+gb.REGISTROS_ACTIVOS.clear()
+_llamadas_enviar_a_cotizar.clear()
+gb.crear_registro_cotizacion = lambda *a, **k: (_ for _ in ()).throw(Exception("GHL caido"))
+gb.TELEFONOS["c3c"] = "+523330079224"
+conv_sin_registro = {"vehiculo": {"clave": "X"}, "datos": {"nombre": "Juan", "edad": 30, "codigo_postal": "01000",
+                                                             "correo": "juan@ejemplo.com"}}
+gb._finalizar_datos_conductor("c3c", conv_sin_registro)
+check("c3c" not in gb.REGISTROS_ACTIVOS, "si crear_registro_cotizacion falla, no se guarda nada en REGISTROS_ACTIVOS")
+check(_llamadas_enviar_a_cotizar == [None],
+      f"si no hay record_id, se llama a enviar_a_cotizar con followup_id=None, sin tronar (obtuvo {_llamadas_enviar_a_cotizar})")
+gb.crear_registro_cotizacion = lambda *a, **k: "rec-1"  # deja el mock neutro para el resto de pruebas
 
 # --- correlacion por telefono: solo contra conversaciones activas 'esperando_cotizacion' ---
 gb.CONVERSACIONES.clear()
@@ -431,6 +470,104 @@ gb.listar_cotizaciones_abiertas = _falla
 respuesta_error = gb.procesar_mensaje_whatsapp("ghl-error", "cotizaciones abiertas")
 check("no pude consultar el estado" in respuesta_error.lower(),
       f"si falla la consulta a GHL, responde con un mensaje claro en vez de tronar (obtuvo {respuesta_error!r})")
+
+# --------------------------------------------------------------------------
+# Status intermedio de cotizacion (Segupoliza, followupid) -- ver
+# COTIZADOR_AUTO_CONTRATO.md seccion "Status intermedio de cotización".
+# --------------------------------------------------------------------------
+
+# --- ESTADOS_PROCESO_COTIZACION: los 5 codigos sugeridos existen ---
+check(set(gb.ESTADOS_PROCESO_COTIZACION.keys()) == {
+    "recibido", "iniciando_cotizacion", "cotizando_aseguradoras", "buscando_mejor_oferta", "generando_pdf",
+}, f"los 5 codigos sugeridos existen tal cual se documentaron (obtuvo {sorted(gb.ESTADOS_PROCESO_COTIZACION.keys())})")
+
+# --- recibir_status_cotizacion_segupoliza: codigo conocido -> se traduce y se guarda ---
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+salida_status = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-a", "status": "recibido"})
+check(salida_status == {"ok": True, "followup_id": "rec-a", "error": None},
+      f"recibir_status_cotizacion_segupoliza con codigo conocido devuelve ok=True (obtuvo {salida_status})")
+check(gb.ESTADOS_COTIZACION_EN_PROCESO["rec-a"]["texto"] == "Recibimos tu solicitud de cotización.",
+      f"el codigo 'recibido' se traduce al texto documentado (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO['rec-a']})")
+
+# variante de mayusculas/espacios en el codigo -- se normaliza antes de comparar
+salida_status2 = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-b", "estado": "Cotizando Aseguradoras"})
+check(salida_status2["ok"] is True
+      and gb.ESTADOS_COTIZACION_EN_PROCESO["rec-b"]["texto"] == "Estamos cotizando con las aseguradoras.",
+      f"un codigo con mayusculas/espacios se normaliza igual (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-b')})")
+
+# codigo NO reconocido -> se usa el texto tal cual, sin bloquear
+salida_status3 = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-c", "texto": "Paso nuevo no anticipado"})
+check(salida_status3["ok"] is True
+      and gb.ESTADOS_COTIZACION_EN_PROCESO["rec-c"]["texto"] == "Paso nuevo no anticipado",
+      f"un status no reconocido se guarda tal cual (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-c')})")
+
+# nombres de campo alternativos para followupid
+salida_status4 = gb.recibir_status_cotizacion_segupoliza({"followUpId": "rec-d", "mensaje": "en proceso"})
+check(salida_status4 == {"ok": True, "followup_id": "rec-d", "error": None},
+      f"followUpId (variante de mayusculas) se reconoce igual (obtuvo {salida_status4})")
+
+# falta followupid -> ok=False, no truena
+salida_status5 = gb.recibir_status_cotizacion_segupoliza({"status": "recibido"})
+check(salida_status5["ok"] is False and salida_status5["followup_id"] is None,
+      f"sin followupid -> ok=False, sin followup_id (obtuvo {salida_status5})")
+
+# falta el texto de status -> ok=False, pero SI regresa el followup_id (util para debug)
+salida_status6 = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-e"})
+check(salida_status6["ok"] is False and salida_status6["followup_id"] == "rec-e",
+      f"sin texto de status -> ok=False pero con followup_id de todas formas (obtuvo {salida_status6})")
+
+# un status nuevo pisa al anterior para el mismo followupid
+gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-a", "status": "generando_pdf"})
+check(gb.ESTADOS_COTIZACION_EN_PROCESO["rec-a"]["texto"] == "Ya casi está: estamos generando el PDF de tu cotización.",
+      f"un status nuevo para el mismo followupid pisa al anterior (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO['rec-a']})")
+
+# --- obtener_estado_proceso_cotizacion: usa REGISTROS_ACTIVOS para encontrar el followup_id del contacto ---
+gb.REGISTROS_ACTIVOS.clear()
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+check(gb.obtener_estado_proceso_cotizacion("c-sin-registro") is None,
+      "sin contacto activo en REGISTROS_ACTIVOS -> None, no truena")
+
+gb.REGISTROS_ACTIVOS["c-status"] = "rec-status-activo"
+check(gb.obtener_estado_proceso_cotizacion("c-status") is None,
+      "hay contacto activo pero todavia no llego ningun status intermedio -> None")
+
+gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-status-activo", "status": "buscando_mejor_oferta"})
+check(gb.obtener_estado_proceso_cotizacion("c-status") == "Estamos buscando la mejor oferta para ti.",
+      f"con status ya recibido, obtener_estado_proceso_cotizacion devuelve el texto mas reciente "
+      f"(obtuvo {gb.obtener_estado_proceso_cotizacion('c-status')!r})")
+
+# --- integrado en 'cotizaciones abiertas': sin Opportunity en GHL todavia, muestra el status local ---
+gb.CONVERSACIONES.clear()
+gb.listar_cotizaciones_abiertas = lambda contact_id: []  # todavia no hay Opportunity en GHL
+respuesta_status_local = gb.procesar_mensaje_whatsapp("c-status", "cotizaciones abiertas")
+check("sigue en proceso" in respuesta_status_local.lower()
+      and "buscando la mejor oferta" in respuesta_status_local.lower(),
+      f"'cotizaciones abiertas' sin Opportunity en GHL pero con status local, lo muestra en vez de "
+      f"'no tienes ninguna cotización abierta' (obtuvo {respuesta_status_local!r})")
+
+# sin status local tampoco (contacto normal, sin followup activo) -> mensaje de siempre
+respuesta_sin_status = gb.procesar_mensaje_whatsapp("c-normal-sin-status", "cotizaciones abiertas")
+check("no tienes ninguna cotización abierta" in respuesta_sin_status.lower(),
+      f"sin Opportunity en GHL y sin status local, se mantiene el mensaje de siempre (obtuvo {respuesta_sin_status!r})")
+
+# --- integrado en la fase 'esperando_cotizacion': el mensaje de espera incluye el status local si hay ---
+gb.CONVERSACIONES.clear()
+gb.CONVERSACIONES["c-status"] = {"fase": "esperando_cotizacion", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
+respuesta_espera_con_status = gb.procesar_mensaje_whatsapp("c-status", "ya esta?")
+check("buscando la mejor oferta" in respuesta_espera_con_status.lower(),
+      f"el mensaje de 'todavia estamos calculando' incluye el status local si ya llego uno "
+      f"(obtuvo {respuesta_espera_con_status!r})")
+
+gb.CONVERSACIONES["c-normal-sin-status"] = {"fase": "esperando_cotizacion", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
+respuesta_espera_sin_status = gb.procesar_mensaje_whatsapp("c-normal-sin-status", "ya esta?")
+check("todavía estamos calculando tu cotización con las aseguradoras. en cuanto"
+      in respuesta_espera_sin_status.lower(),
+      f"sin status local, el mensaje de espera se queda igual que antes, sin texto extra "
+      f"(obtuvo {respuesta_espera_sin_status!r})")
+
+gb.CONVERSACIONES.clear()
+gb.REGISTROS_ACTIVOS.clear()
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
 
 # --------------------------------------------------------------------------
 # 'reiniciar' avisa (sin bloquear) si el contacto ya tiene cotizaciones

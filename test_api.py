@@ -494,6 +494,30 @@ d = r.json()
 check(r.status_code == 200 and d["ok"] is False and "resultado" in d["error"],
       f"/cotizador-auto/webhook sin 'resultado' -> ok=False con error claro (obtuvo {d})")
 
+# --- contrato de status intermedio (followupid) -- se distingue de los otros dos ---
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+r = client.post("/cotizador-auto/webhook", json={"followupid": "rec-status-1", "status": "cotizando_aseguradoras"})
+d = r.json()
+check(r.status_code == 200 and d["ok"] is True and d["followup_id"] == "rec-status-1" and d["contact_id"] is None,
+      f"/cotizador-auto/webhook con followupid+status enruta al contrato de status intermedio (obtuvo {d})")
+check(gb.ESTADOS_COTIZACION_EN_PROCESO.get("rec-status-1", {}).get("texto") == "Estamos cotizando con las aseguradoras.",
+      f"el status se guarda traducido al texto en español (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-status-1')})")
+
+# nombre de campo alternativo (followUpId) y texto libre no reconocido -- se usa tal cual
+r = client.post("/cotizador-auto/webhook", json={"followUpId": "rec-status-2", "mensaje": "Ya casi acabamos, danos un minuto"})
+d = r.json()
+check(d["ok"] is True and d["followup_id"] == "rec-status-2",
+      f"followUpId (variante de mayusculas) tambien se reconoce (obtuvo {d})")
+check(gb.ESTADOS_COTIZACION_EN_PROCESO.get("rec-status-2", {}).get("texto") == "Ya casi acabamos, danos un minuto",
+      f"un status que no coincide con ninguno de los 5 codigos se guarda tal cual, sin bloquear (obtuvo "
+      f"{gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-status-2')})")
+
+# falta el texto de status -> ok=False, no truena
+r = client.post("/cotizador-auto/webhook", json={"followupid": "rec-status-3"})
+d = r.json()
+check(r.status_code == 200 and d["ok"] is False and d["followup_id"] == "rec-status-3",
+      f"followupid sin status/mensaje/texto/estado -> ok=False con error claro (obtuvo {d})")
+
 # marca en el mensaje final de "resuelto"
 client.post("/ghl/webhook", json={"contact_id": "ghl-marca", "mensaje": "corolla 2024"})
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-marca", "mensaje": "xle"})

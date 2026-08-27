@@ -123,6 +123,117 @@ TELEFONOS: Dict[str, str] = {}
 # como respaldo -- ver ahi).
 REGISTROS_ACTIVOS: Dict[str, str] = {}
 
+# --- Status intermedio de cotizacion (Segupoliza) -----------------------
+#
+# Ademas del webhook final de resultado (recibir_resultado_cotizacion_segupoliza,
+# que NO trae un id confiable -- confirmado por el cliente, "pueden venir
+# '-1' hasta en produccion"), Segupoliza CONFIRMO que puede mandar webhooks
+# intermedios de STATUS mientras cotiza, correlacionados por un "followupid"
+# que nosotros les mandamos al iniciar la cotizacion (ver
+# segupoliza_client.armar_payload -- lo mandamos como el record_id del
+# Custom Object que ya creamos en GHL, ver _finalizar_datos_conductor).
+#
+# Con eso el usuario puede preguntar "como va mi cotizacion" MIENTRAS
+# Segupoliza sigue trabajando (antes de que exista una Opportunity en GHL) y
+# le contestamos con el ultimo status recibido, en vez de "no tienes
+# ninguna cotizacion abierta" o dejarlo esperando en silencio.
+#
+# 5 codigos de status sugeridos para el equipo de Segupoliza (pueden mandar
+# cualquiera de estos codigos, o directamente el texto en español que
+# quieren que se muestre -- ver recibir_status_cotizacion_segupoliza). Ver
+# tambien COTIZADOR_AUTO_CONTRATO.md para la documentacion completa
+# orientada al programador que integra esto del lado de Segupoliza.
+ESTADOS_PROCESO_COTIZACION: Dict[str, str] = {
+    "recibido": "Recibimos tu solicitud de cotización.",
+    "iniciando_cotizacion": "Estamos iniciando tu cotización.",
+    "cotizando_aseguradoras": "Estamos cotizando con las aseguradoras.",
+    "buscando_mejor_oferta": "Estamos buscando la mejor oferta para ti.",
+    "generando_pdf": "Ya casi está: estamos generando el PDF de tu cotización.",
+}
+
+# followup_id (== record_id del Custom Object, ver REGISTROS_ACTIVOS) ->
+# {"texto": str, "codigo": str|None, "actualizado": iso8601 str}.
+# En memoria, misma limitacion POC que CONVERSACIONES/REGISTROS_ACTIVOS.
+ESTADOS_COTIZACION_EN_PROCESO: Dict[str, dict] = {}
+
+
+def _extraer_campo(data: dict, *claves: str) -> Optional[str]:
+    """Busca la primera clave presente (y con valor truthy) en data.
+
+    Copia local de la misma utilidad que ya existe en main.py -- se
+    duplica aqui (en vez de importarla) para no crear un import circular
+    entre main.py y ghl_bridge.py, y porque es una funcion pequeña y sin
+    estado.
+    """
+    if not isinstance(data, dict):
+        return None
+    for clave in claves:
+        valor = data.get(clave)
+        if valor:
+            return str(valor)
+    return None
+
+
+def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
+    """Procesa un webhook de STATUS intermedio de Segupoliza (no el resultado final).
+
+    Se distingue del webhook de resultado final porque este SI trae un
+    "followupid" confiable (confirmado con Segupoliza) -- el mismo valor
+    que nosotros les mandamos al iniciar la cotizacion (ver
+    segupoliza_client.armar_payload). El resultado final, en cambio, no
+    trae ningun id confiable y se sigue correlacionando por telefono (ver
+    recibir_resultado_cotizacion_segupoliza).
+
+    Payload esperado (nombres de campo flexibles, ver _extraer_campo):
+      - followupid / followUpId / followup_id / FollowupId: el id que les
+        mandamos al iniciar la cotizacion.
+      - status / mensaje / texto / estado: o bien uno de los codigos de
+        ESTADOS_PROCESO_COTIZACION ("recibido", "iniciando_cotizacion",
+        "cotizando_aseguradoras", "buscando_mejor_oferta",
+        "generando_pdf"), o directamente el texto en español que quieren
+        mostrar (si no coincide con ningun codigo conocido se usa tal
+        cual, para no bloquear a Segupoliza si agregan un status nuevo
+        que no anticipamos).
+
+    Devuelve {"ok": bool, "followup_id": str|None, "error": str|None}.
+    """
+    followup_id = _extraer_campo(payload, "followupid", "followUpId", "followup_id", "FollowupId", "FollowUpId")
+    if not followup_id:
+        return {"ok": False, "followup_id": None, "error": "Falta followupid en el payload."}
+
+    crudo = _extraer_campo(payload, "status", "mensaje", "texto", "estado")
+    if not crudo:
+        return {"ok": False, "followup_id": followup_id, "error": "Falta status/mensaje/texto/estado en el payload."}
+
+    codigo_normalizado = crudo.strip().lower().replace(" ", "_")
+    texto = ESTADOS_PROCESO_COTIZACION.get(codigo_normalizado, crudo)
+
+    ESTADOS_COTIZACION_EN_PROCESO[followup_id] = {
+        "texto": texto,
+        "codigo": codigo_normalizado if codigo_normalizado in ESTADOS_PROCESO_COTIZACION else None,
+        "actualizado": datetime.now(timezone.utc).isoformat(),
+    }
+    print(f"[segupoliza-status] followupid={followup_id}: {texto}")
+    return {"ok": True, "followup_id": followup_id, "error": None}
+
+
+def obtener_estado_proceso_cotizacion(contact_id: str) -> Optional[str]:
+    """Devuelve el texto del ultimo status intermedio recibido para este contacto, si hay.
+
+    Busca el followup_id activo del contacto en REGISTROS_ACTIVOS (mismo
+    record_id que se manda como followupid a Segupoliza, ver
+    _finalizar_datos_conductor/enviar_a_cotizar) y con eso busca en
+    ESTADOS_COTIZACION_EN_PROCESO. Devuelve None si no hay contacto
+    activo o no ha llegado ningun status intermedio todavia.
+    """
+    followup_id = REGISTROS_ACTIVOS.get(contact_id)
+    if not followup_id:
+        return None
+    estado = ESTADOS_COTIZACION_EN_PROCESO.get(followup_id)
+    if not estado:
+        return None
+    return estado.get("texto")
+
 
 class GHLError(Exception):
     pass
@@ -757,7 +868,8 @@ def obtener_datos_conductor(contact_id: str) -> Optional[dict]:
             "correo": correo, "genero": genero}
 
 
-def enviar_a_cotizar(contact_id: str, vehiculo: dict, datos_conductor: dict) -> bool:
+def enviar_a_cotizar(contact_id: str, vehiculo: dict, datos_conductor: dict,
+                      followup_id: Optional[str] = None) -> bool:
     """Dispara la solicitud de cotizacion. Dos caminos, en este orden:
 
     1) SEGUPOLIZA_TOKEN configurado -> API REAL de Segupoliza (ver
@@ -767,12 +879,21 @@ def enviar_a_cotizar(contact_id: str, vehiculo: dict, datos_conductor: dict) -> 
        callback_url en este request, a proposito, ver segupoliza_client.py)
        -- ver recibir_resultado_cotizacion_segupoliza() mas abajo.
 
+       "followup_id" (opcional, tipicamente el record_id del Custom Object
+       que ya creamos para esta cotizacion -- ver _finalizar_datos_conductor)
+       se manda a Segupoliza como "followupid" -- CONFIRMADO con Segupoliza
+       que es el id que van a regresar en cada webhook de STATUS
+       INTERMEDIO mientras procesan la cotizacion (ver
+       recibir_status_cotizacion_segupoliza() y ESTADOS_PROCESO_COTIZACION
+       mas abajo, y la seccion completa en COTIZADOR_AUTO_CONTRATO.md).
+
     2) Si no, respaldo al mecanismo viejo/demo (COTIZADOR_AUTO_URL +
        callback_url) -- se conserva para poder seguir probando el flujo
        end-to-end con demo_cotizador_auto.py / probar_cotizador_demo.py sin
        credenciales reales de Segupoliza. Este SI recibe el resultado via
        callback a nuestra propia URL (ver recibir_resultado_cotizacion(),
-       el contrato viejo).
+       el contrato viejo). No usa followup_id -- ese contrato ya correlaciona
+       por contact_id directo en el callback_url.
 
     IMPORTANTE: ambos corren en un hilo aparte, sin esperar la respuesta --
     a proposito. Si se hiciera de forma sincrona (bloqueando este
@@ -789,8 +910,9 @@ def enviar_a_cotizar(contact_id: str, vehiculo: dict, datos_conductor: dict) -> 
     if segupoliza.SEGUPOLIZA_TOKEN:
         def _disparar_segupoliza():
             try:
-                ack = segupoliza.enviar_cotizacion(vehiculo, datos_conductor)
-                print(f"[segupoliza] solicitud de cotizacion enviada para {contact_id}: {ack}")
+                ack = segupoliza.enviar_cotizacion(vehiculo, datos_conductor, followup_id=followup_id)
+                print(f"[segupoliza] solicitud de cotizacion enviada para {contact_id} "
+                      f"(followupid={followup_id}): {ack}")
             except Exception as e:
                 print(f"[segupoliza] fallo el envio de la cotizacion para {contact_id}: {e}")
 
@@ -1482,6 +1604,7 @@ def _finalizar_datos_conductor(contact_id: str, conv: dict) -> str:
     # para correlacionar su webhook de resultado despues.
     datos["telefono"] = TELEFONOS.get(contact_id) or ""
 
+    record_id = None
     try:
         record_id = crear_registro_cotizacion(contact_id, vehiculo, datos)
         if record_id:
@@ -1491,7 +1614,13 @@ def _finalizar_datos_conductor(contact_id: str, conv: dict) -> str:
 
     enviado = False
     try:
-        enviado = enviar_a_cotizar(contact_id, vehiculo, datos)
+        # record_id como followup_id -- ver enviar_a_cotizar/armar_payload
+        # para el porque (correlacionar los status intermedios de
+        # Segupoliza sin depender del telefono). Si record_id vino None
+        # (crear_registro_cotizacion fallo arriba), se manda sin
+        # followup_id -- la cotizacion sigue su curso, solo que esta en
+        # particular no va a poder mostrar status intermedios en vivo.
+        enviado = enviar_a_cotizar(contact_id, vehiculo, datos, followup_id=record_id)
     except Exception:
         enviado = False
 
@@ -1589,6 +1718,14 @@ def procesar_mensaje_whatsapp(
             print(f"[listar-cotizaciones] fallo consultando GHL para {contact_id}: {e}")
             return ("Por el momento no pude consultar el estado de tus cotizaciones -- intenta de "
                      "nuevo en un momento, o dime marca, modelo y año si quieres cotizar un vehículo.")
+        if not oportunidades:
+            # Todavia no existe la Opportunity en GHL (Segupoliza sigue
+            # cotizando) -- si ya tenemos un status intermedio local (ver
+            # recibir_status_cotizacion_segupoliza), se lo mostramos en vez
+            # de decirle que no tiene ninguna cotización abierta.
+            status_local = obtener_estado_proceso_cotizacion(contact_id)
+            if status_local:
+                return (f"Tu cotización sigue en proceso: {status_local} En cuanto esté lista te aviso.")
         return _formatear_cotizaciones_abiertas(oportunidades)
 
     # comando global (mismo nivel/patron que _es_listar_cotizaciones, pero
@@ -1618,7 +1755,9 @@ def procesar_mensaje_whatsapp(
     # Datos completos, esperando el resultado de la API de cotizacion
     # (llega via el callback a /cotizador-auto/webhook, no por WhatsApp).
     if conv and conv.get("fase") == "esperando_cotizacion":
-        return ("Todavía estamos calculando tu cotización con las aseguradoras -- en cuanto esté "
+        status_local = obtener_estado_proceso_cotizacion(contact_id)
+        detalle_status = f" {status_local}" if status_local else ""
+        return (f"Todavía estamos calculando tu cotización con las aseguradoras.{detalle_status} En cuanto esté "
                 "lista te contacto. Si quieres cotizar otro vehículo mientras tanto, escribe "
                 "\"reiniciar\", o \"cotizaciones abiertas\" para ver el estado.")
 

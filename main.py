@@ -303,6 +303,10 @@ class GHLWebhookOut(BaseModel):
 class CotizadorAutoWebhookOut(BaseModel):
     ok: bool
     contact_id: Optional[str] = None
+    # Solo se llena para el contrato de STATUS intermedio (ver
+    # ghl_bridge.recibir_status_cotizacion_segupoliza) -- ese contrato no
+    # tiene contact_id, se correlaciona por followupid.
+    followup_id: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -1296,25 +1300,34 @@ async def ghl_webhook(request: Request, dry_run: bool = False):
 
 @app.post("/cotizador-auto/webhook", response_model=CotizadorAutoWebhookOut)
 async def cotizador_auto_webhook(request: Request):
-    """Callback del resultado de la cotizacion de auto -- soporta DOS
-    contratos distintos, detectados por la forma del body:
+    """Callback de la cotizacion de auto -- soporta TRES contratos
+    distintos, detectados por la forma del body:
 
-    1) Contrato REAL de Segupoliza (ver COTIZADOR_AUTO_CONTRATO.md y
-       'response ghl.json'): un payload con top-level "prospecto"
-       (nombre/whatsapp/etc.), "primas" (hasta 5 opciones de aseguradora) y
-       "objeto_seguro". NO trae contact_id ni un folio/id confiable -- la
-       correlacion contra la conversacion se hace por telefono
-       (prospecto.whatsapp), ver
+    1) Contrato de STATUS intermedio de Segupoliza (CONFIRMADO con
+       Segupoliza, ver COTIZADOR_AUTO_CONTRATO.md seccion "Status
+       intermedio de cotizacion"): un payload con "followupid" (el mismo
+       id que nosotros les mandamos al iniciar la cotizacion, ver
+       segupoliza_client.armar_payload) y un texto de status
+       (status/mensaje/texto/estado). Se puede mandar varias veces
+       mientras la cotizacion esta en proceso. Ver
+       ghl_bridge.recibir_status_cotizacion_segupoliza().
+
+    2) Contrato REAL de resultado FINAL de Segupoliza (ver
+       COTIZADOR_AUTO_CONTRATO.md y 'response ghl.json'): un payload con
+       top-level "prospecto" (nombre/whatsapp/etc.), "primas" (hasta 5
+       opciones de aseguradora) y "objeto_seguro". NO trae contact_id ni
+       un folio/id confiable -- la correlacion contra la conversacion se
+       hace por telefono (prospecto.whatsapp), ver
        ghl_bridge.recibir_resultado_cotizacion_segupoliza().
 
-    2) Contrato viejo/demo (compatibilidad con demo_cotizador_auto.py /
+    3) Contrato viejo/demo (compatibilidad con demo_cotizador_auto.py /
        probar_cotizador_demo.py): {"contact_id": "...", "resultado": {...}}
        -- se sigue soportando para no romper las pruebas manuales del flujo
        demo. Ver ghl_bridge.recibir_resultado_cotizacion().
 
     Si definiste COTIZADOR_AUTO_WEBHOOK_SECRET en el entorno, hay que
     mandarlo como ?secret=... o header X-Cotizador-Secret -- igual que
-    GHL_WEBHOOK_SECRET en /ghl/webhook (aplica a ambos contratos)."""
+    GHL_WEBHOOK_SECRET en /ghl/webhook (aplica a los tres contratos)."""
     if not _GHL_DISPONIBLE:
         raise HTTPException(
             status_code=501,
@@ -1346,12 +1359,20 @@ async def cotizador_auto_webhook(request: Request):
             error=None if ok else "No se pudo guardar el resultado en GHL (revisa logs).",
         )
 
+    followup_id = _extraer_campo(data, "followupid", "followUpId", "followup_id", "FollowupId", "FollowUpId")
+    if followup_id:
+        # contrato de status intermedio -- se distingue de los otros dos
+        # porque trae followupid (y ninguno de los otros dos lo trae).
+        salida = ghl_bridge.recibir_status_cotizacion_segupoliza(data)
+        return CotizadorAutoWebhookOut(**salida)
+
     if "prospecto" in data:
-        # contrato real de Segupoliza -- sin contact_id, correlacion por telefono
+        # contrato real de resultado final de Segupoliza -- sin contact_id, correlacion por telefono
         salida = ghl_bridge.recibir_resultado_cotizacion_segupoliza(data)
         return CotizadorAutoWebhookOut(**salida)
 
     return CotizadorAutoWebhookOut(
         ok=False, contact_id=contact_id,
-        error="Falta 'contact_id'+'resultado' (contrato demo) o 'prospecto' (contrato Segupoliza) en el body.",
+        error=("Falta 'contact_id'+'resultado' (contrato demo), 'prospecto' (contrato de resultado final) o "
+               "'followupid' (contrato de status intermedio) en el body."),
     )
