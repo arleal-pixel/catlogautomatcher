@@ -251,7 +251,22 @@ conversación (igual que "reiniciar"): si el cliente escribe algo como
 *"cotizaciones abiertas"*, *"mis cotizaciones"*, *"cómo va mi cotización"*
 o *"cotizaciones en proceso"*, el bot consulta GHL en vivo y le contesta
 con la lista (o le dice que no tiene ninguna abierta), y de una vez le
-recuerda que puede cotizar otro vehículo.
+recuerda que puede cotizar otro vehículo. Cada cotización se muestra con
+el nombre de su **etapa actual del pipeline** entre paréntesis (ej. *"1.
+RENAULT CLIO RS -- $9,663.33 (Cotización Recibida / Decidiendo)"*) --
+`obtener_etapas_pipeline()` consulta `GET /opportunities/pipelines` para
+traducir el `pipelineStageId` crudo de cada Opportunity a su nombre
+legible. Si esa consulta falla, la lista se sigue mostrando igual, solo
+sin el nombre de la etapa (no es un dato crítico).
+
+Además, **"reiniciar" ahora avisa (sin bloquear)** si el contacto ya tenía
+cotizaciones abiertas antes de borrar la conversación local: agrega una
+línea al final del mensaje de reinicio de siempre invitando a escribir
+"cotizaciones abiertas" para ver el detalle, y sigue reiniciando de todas
+formas (el aviso no interrumpe el flujo, solo evita que el cliente pierda
+de vista una cotización en proceso por accidente). Si la consulta a GHL
+falla, el mensaje de reinicio se manda exactamente igual que antes, sin el
+aviso.
 
 Variable de entorno necesaria:
 ```
@@ -281,6 +296,35 @@ real): la forma exacta de cada Opportunity en la respuesta (`name`,
 usa tu cuenta) — si el comando siempre regresa "no tienes ninguna
 cotización abierta" aunque sepas que sí hay una, es lo primero que hay que
 revisar (`_contact_id_de_opportunity` en `ghl_bridge.py`).
+
+### Pólizas activas (comando "pólizas activas")
+
+Comando nuevo, separado de "cotizaciones abiertas" -- para cuando el
+proceso ya terminó y la Opportunity llegó a la etapa **"Oportunidad
+Ganada"** del mismo pipeline "cotizaciones autos" (que en GHL pone el
+`status` nativo de la Opportunity en `"won"`). Si el cliente escribe algo
+como *"pólizas activas"*, *"mi póliza vigente"*, *"tengo póliza"* o *"ver
+mis pólizas"*, el bot consulta GHL en vivo (`listar_polizas_activas()`,
+mismo filtro doble por contactId que `listar_cotizaciones_abiertas()`) y
+le contesta con la lista de vehículos con póliza activa.
+
+Variable de entorno (opcional):
+```
+GHL_STATUS_POLIZA_ACTIVA=won
+```
+Por default ya es `"won"` -- solo hace falta tocarla si más adelante se
+decide que otro status/etapa también debería contar como "póliza activa".
+
+**Pendiente a propósito -- el PDF de la póliza:** por ahora el comando NO
+manda el link ni el PDF de la póliza, porque ese dato todavía no vive en
+ningún lado accesible por API (ni la Opportunity ni el Contact tienen ese
+campo en GHL hoy). El mensaje se lo dice claro al cliente ("por ahora no
+puedo mandarte el PDF por aquí -- pídeselo a tu asesor") en vez de
+prometer algo que no puede cumplir. Para completar esto, falta decidir
+dónde va a vivir ese link (la opción más simple: un campo `TEXT` nuevo en
+la Opportunity, ej. `poliza_pdf_url`, llenado por el mismo workflow de GHL
+que procesa el resultado de Segupoliza -- mismo patrón que se usó para
+agregar `canal`) y después exponerlo en `_formatear_polizas_activas()`.
 
 ### El bot ignora la respuesta a los botones nativos de GHL
 

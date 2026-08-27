@@ -302,6 +302,58 @@ check(len(resultado_filtro) == 1 and resultado_filtro[0]["name"] == "TOYOTA CORO
       f"aunque GHL regrese Opportunities de otros contactos mezcladas, SOLO se quedan las de c1 "
       f"(obtuvo {resultado_filtro})")
 
+# --------------------------------------------------------------------------
+# obtener_etapas_pipeline / _buscar_opportunities_pipeline: nombre legible
+# de la etapa adjunto a cada Opportunity (para mostrarlo en 'cotizaciones
+# abiertas'). Se corre ANTES de que listar_cotizaciones_abiertas se
+# monkeypatchee mas abajo (ver "integrado en procesar_mensaje_whatsapp").
+# --------------------------------------------------------------------------
+class _RespuestaOpportunitiesConEtapa:
+    status_code = 200
+    def json(self):
+        return {"opportunities": [
+            {"name": "RENAULT CLIO RS", "contactId": "c-etapa", "pipelineStageId": "etapa-1"},
+        ]}
+
+class _RespuestaPipelinesFalsa:
+    status_code = 200
+    def json(self):
+        return {"pipelines": [
+            {"id": "pipeline-fake", "name": "Cotizaciones autos Segupoliza", "stages": [
+                {"id": "etapa-1", "name": "Cotización Recibida / Decidiendo"},
+                {"id": "etapa-2", "name": "Oportunidad Ganada"},
+            ]},
+            {"id": "otro-pipeline", "stages": [{"id": "x", "name": "no deberia usarse"}]},
+        ]}
+
+class _ClienteConEtapaFalso:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def get(self, url, *a, **k):
+        if "/opportunities/pipelines" in url:
+            return _RespuestaPipelinesFalsa()
+        return _RespuestaOpportunitiesConEtapa()
+
+gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
+gb.GHL_API_TOKEN = "fake-token"
+gb.httpx.Client = _ClienteConEtapaFalso
+try:
+    resultado_etapa = gb.listar_cotizaciones_abiertas("c-etapa")
+    etapas_directo = gb.obtener_etapas_pipeline("pipeline-fake")
+    etapas_no_encontrado = gb.obtener_etapas_pipeline("pipeline-que-no-existe")
+finally:
+    gb.httpx.Client = _httpx_original
+    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
+
+check(etapas_directo == {"etapa-1": "Cotización Recibida / Decidiendo", "etapa-2": "Oportunidad Ganada"},
+      f"obtener_etapas_pipeline mapea id->nombre SOLO del pipeline correcto (obtuvo {etapas_directo})")
+check(etapas_no_encontrado == {},
+      f"pipeline no encontrado en la respuesta -> {{}} sin tronar (obtuvo {etapas_no_encontrado})")
+check(len(resultado_etapa) == 1 and resultado_etapa[0].get("_etapa_nombre") == "Cotización Recibida / Decidiendo",
+      f"listar_cotizaciones_abiertas le adjunta el nombre legible de la etapa a cada Opportunity "
+      f"(obtuvo {resultado_etapa})")
+
 # --- _formatear_cotizaciones_abiertas ---
 texto_vacio = gb._formatear_cotizaciones_abiertas([])
 check("no tienes ninguna cotización abierta" in texto_vacio.lower(),
@@ -315,6 +367,17 @@ check("TOYOTA COROLLA XLE 2024" in texto_lista and "$12,345.67" in texto_lista,
       f"la opportunity con monetaryValue se muestra con precio formateado (obtuvo:\n{texto_lista})")
 check("VOLKSWAGEN JETTA 2020" in texto_lista,
       f"la opportunity SIN monetaryValue igual se lista, sin tronar (obtuvo:\n{texto_lista})")
+
+texto_con_etapa = gb._formatear_cotizaciones_abiertas([
+    {"name": "RENAULT CLIO RS", "monetaryValue": 9663.33, "_etapa_nombre": "Cotización Recibida / Decidiendo"},
+])
+check("(Cotización Recibida / Decidiendo)" in texto_con_etapa,
+      f"si la opportunity trae '_etapa_nombre', se muestra entre parentesis (obtuvo:\n{texto_con_etapa})")
+
+texto_sin_etapa_2 = gb._formatear_cotizaciones_abiertas([{"name": "SIN ETAPA", "monetaryValue": 100}])
+check("(" not in texto_sin_etapa_2.split("\n")[1],
+      f"sin '_etapa_nombre', no se muestra nada entre parentesis -- compatible con el formato de antes "
+      f"(obtuvo:\n{texto_sin_etapa_2})")
 
 # --- integrado en procesar_mensaje_whatsapp: comando global, en cualquier fase ---
 gb.CONVERSACIONES.clear()
@@ -347,6 +410,124 @@ gb.listar_cotizaciones_abiertas = _falla
 respuesta_error = gb.procesar_mensaje_whatsapp("ghl-error", "cotizaciones abiertas")
 check("no pude consultar el estado" in respuesta_error.lower(),
       f"si falla la consulta a GHL, responde con un mensaje claro en vez de tronar (obtuvo {respuesta_error!r})")
+
+# --------------------------------------------------------------------------
+# 'reiniciar' avisa (sin bloquear) si el contacto ya tiene cotizaciones
+# abiertas de antes -- ver el comportamiento nuevo en procesar_mensaje_whatsapp.
+# gb.listar_cotizaciones_abiertas ya viene monkeypatcheado desde el bloque
+# de arriba (queda en _falla) -- se vuelve a fijar aqui para este caso.
+# --------------------------------------------------------------------------
+gb.CONVERSACIONES.clear()
+gb.listar_cotizaciones_abiertas = lambda contact_id: (
+    [{"name": "RENAULT CLIO RS", "monetaryValue": 9663.33}] if contact_id == "ghl-reinicia-con-abiertas" else []
+)
+
+gb.CONVERSACIONES["ghl-reinicia-con-abiertas"] = {"fase": "datos_conductor", "paso": "edad",
+                                                    "vehiculo": {}, "datos": {}, "actualizado": "z"}
+respuesta_reinicia_con = gb.procesar_mensaje_whatsapp("ghl-reinicia-con-abiertas", "reiniciar")
+check("empezamos de nuevo" in respuesta_reinicia_con.lower()
+      and "cotización abierta" in respuesta_reinicia_con.lower()
+      and "cotizaciones abiertas" in respuesta_reinicia_con.lower()
+      and "ghl-reinicia-con-abiertas" not in gb.CONVERSACIONES,
+      f"'reiniciar' con cotizaciones abiertas existentes avisa Y limpia la sesion de todas formas "
+      f"(obtuvo {respuesta_reinicia_con!r})")
+
+respuesta_reinicia_sin = gb.procesar_mensaje_whatsapp("ghl-reinicia-sin-abiertas", "reiniciar")
+check(respuesta_reinicia_sin == "Listo, empezamos de nuevo. Dime marca, modelo y año del auto.",
+      f"'reiniciar' SIN cotizaciones abiertas se queda exactamente igual que antes, sin aviso extra "
+      f"(obtuvo {respuesta_reinicia_sin!r})")
+
+def _falla_reiniciar(contact_id):
+    raise gb.GHLError("simulado: GHL no respondio")
+gb.listar_cotizaciones_abiertas = _falla_reiniciar
+respuesta_reinicia_falla = gb.procesar_mensaje_whatsapp("ghl-reinicia-falla", "reiniciar")
+check(respuesta_reinicia_falla == "Listo, empezamos de nuevo. Dime marca, modelo y año del auto.",
+      f"si falla la consulta al reiniciar, el mensaje de reinicio se manda igual, sin tronar "
+      f"(obtuvo {respuesta_reinicia_falla!r})")
+
+# --------------------------------------------------------------------------
+# Pólizas activas (status=GHL_STATUS_POLIZA_ACTIVA, por default "won") --
+# comando nuevo 'polizas activas', separado de 'cotizaciones abiertas'.
+# PENDIENTE a proposito: todavia no incluye el link del PDF (no esta
+# definido en GHL todavia).
+# --------------------------------------------------------------------------
+
+# --- _es_listar_polizas: reconoce el comando en varias formas ---
+check(gb._es_listar_polizas("polizas activas") is True, "'polizas activas' se reconoce")
+check(gb._es_listar_polizas("mi poliza vigente") is True, "'mi poliza vigente' se reconoce")
+check(gb._es_listar_polizas("tengo poliza?") is True, "'tengo poliza?' se reconoce")
+check(gb._es_listar_polizas("ver mis polizas") is True, "'ver mis polizas' se reconoce")
+check(gb._es_listar_polizas("cotizaciones abiertas") is False,
+      "'cotizaciones abiertas' NO se confunde con el comando de polizas")
+check(gb._es_listar_polizas("jetta 2020") is False, "una descripcion de vehiculo NO se confunde con el comando")
+check(gb._es_listar_polizas("hola") is False, "un saludo NO se confunde con el comando")
+
+# --- listar_polizas_activas: usa status=GHL_STATUS_POLIZA_ACTIVA en la consulta ---
+_params_capturados = []
+class _RespuestaPolizasFalsa:
+    status_code = 200
+    def json(self):
+        return {"opportunities": [
+            {"name": "HONDA CR-V TURBO PLUS", "contactId": "c-poliza", "pipelineStageId": "etapa-2"},
+        ]}
+
+class _ClientePolizasFalso:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def get(self, url, params=None, **k):
+        if "/opportunities/pipelines" in url:
+            return _RespuestaPipelinesFalsa()
+        _params_capturados.append(params)
+        return _RespuestaPolizasFalsa()
+
+gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = "pipeline-fake"
+gb.GHL_API_TOKEN = "fake-token"
+gb.httpx.Client = _ClientePolizasFalso
+try:
+    resultado_polizas = gb.listar_polizas_activas("c-poliza")
+finally:
+    gb.httpx.Client = _httpx_original
+    gb.GHL_PIPELINE_COTIZACIONES_AUTOS_ID = None
+
+check(_params_capturados and _params_capturados[0]["status"] == gb.GHL_STATUS_POLIZA_ACTIVA == "won",
+      f"listar_polizas_activas consulta con status='won' (GHL_STATUS_POLIZA_ACTIVA), no 'open' "
+      f"(obtuvo params={_params_capturados})")
+check(len(resultado_polizas) == 1 and resultado_polizas[0]["name"] == "HONDA CR-V TURBO PLUS"
+      and resultado_polizas[0].get("_etapa_nombre") == "Oportunidad Ganada",
+      f"la poliza activa se lista con su nombre y etapa (obtuvo {resultado_polizas})")
+
+# --- _formatear_polizas_activas ---
+texto_polizas_vacio = gb._formatear_polizas_activas([])
+check("no tienes ninguna póliza activa" in texto_polizas_vacio.lower(),
+      f"lista vacia -> mensaje claro de que no hay polizas activas (obtuvo {texto_polizas_vacio!r})")
+
+texto_polizas_lista = gb._formatear_polizas_activas([{"name": "HONDA CR-V TURBO PLUS"}])
+check("HONDA CR-V TURBO PLUS" in texto_polizas_lista and "no puedo mandarte el pdf" in texto_polizas_lista.lower(),
+      f"la poliza se lista y se avisa (sin prometer) que el PDF todavia no esta disponible por aqui "
+      f"(obtuvo:\n{texto_polizas_lista})")
+
+# --- integrado end-to-end en procesar_mensaje_whatsapp ---
+gb.CONVERSACIONES.clear()
+gb.listar_polizas_activas = lambda contact_id: (
+    [{"name": "HONDA CR-V TURBO PLUS"}] if contact_id == "ghl-con-poliza" else []
+)
+respuesta_poliza_con = gb.procesar_mensaje_whatsapp("ghl-con-poliza", "polizas activas")
+check("HONDA CR-V TURBO PLUS" in respuesta_poliza_con,
+      f"'polizas activas' consulta GHL en vivo y muestra la poliza (obtuvo {respuesta_poliza_con!r})")
+
+respuesta_poliza_sin = gb.procesar_mensaje_whatsapp("ghl-sin-poliza", "mi poliza vigente")
+check("no tienes ninguna póliza activa" in respuesta_poliza_sin.lower(),
+      f"sin polizas activas, dice claro que no hay ninguna (obtuvo {respuesta_poliza_sin!r})")
+
+def _falla_polizas(contact_id):
+    raise gb.GHLError("simulado: GHL no respondio")
+gb.listar_polizas_activas = _falla_polizas
+respuesta_poliza_error = gb.procesar_mensaje_whatsapp("ghl-poliza-error", "tengo poliza")
+check("no pude consultar tus pólizas" in respuesta_poliza_error.lower(),
+      f"si falla la consulta a GHL, responde con un mensaje claro en vez de tronar (obtuvo {respuesta_poliza_error!r})")
+
+gb.CONVERSACIONES.clear()
 
 # --------------------------------------------------------------------------
 # correo sugerido desde el Contact nativo de GHL (no solo desde

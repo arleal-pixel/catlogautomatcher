@@ -63,6 +63,22 @@ GHL_OBJETO_SCHEMA_KEY = os.environ.get("GHL_OBJETO_SCHEMA_KEY", "custom_objects.
 # cotizaciones abiertas") sin duplicar ese estado de nuestro lado.
 GHL_PIPELINE_COTIZACIONES_AUTOS_ID = os.environ.get("GHL_PIPELINE_COTIZACIONES_AUTOS_ID")
 
+# "status" de la API de Opportunities de GHL que se considera "poliza ya
+# emitida/activa" -- por default el status nativo "won" (la etapa
+# "Oportunidad Ganada" del pipeline mueve la Opportunity a este status),
+# ver listar_polizas_activas() mas abajo. Configurable por si mas adelante
+# se decide que otra etapa/status tambien deba contar (ej. si "Revisar
+# Documentos / Emitir Poliza" tambien se considera poliza activa) -- SIN
+# tocar codigo, solo esta variable de entorno.
+GHL_STATUS_POLIZA_ACTIVA = os.environ.get("GHL_STATUS_POLIZA_ACTIVA", "won")
+
+# NOTA (pendiente, a proposito no implementado todavia): el link/PDF de la
+# poliza ya emitida NO se guarda en ningun lado por ahora -- ni la
+# Opportunity ni el Contact tienen ese campo definido en GHL. Cuando se
+# decida donde va a vivir (ej. un campo TEXT nuevo en la Opportunity,
+# mismo patron que "canal"), agregar aqui el nombre de esa propiedad y
+# exponerlo en _formatear_polizas_activas().
+
 # La API de Custom Objects usa un header Version distinto al resto de la
 # API de GHL (que usa la fecha en GHL_API_VERSION, ej. "2021-07-28") --
 # esta usa el literal "v3". Confirmado en vivo: con la fecha responde
@@ -248,6 +264,43 @@ def _contact_id_de_opportunity(op: dict) -> Optional[str]:
     return None
 
 
+def obtener_etapas_pipeline(pipeline_id: str) -> Dict[str, str]:
+    """GET /opportunities/pipelines -- devuelve {stage_id: nombre_etapa}
+    para el pipeline indicado, para poder mostrar la etapa legible (ej.
+    "Cotización Recibida / Decidiendo") en vez de solo el id crudo. Se
+    llama una vez por cada listado (no hay cache -- el volumen de este bot
+    no lo justifica todavia, y asi nunca se muestra una etapa vieja/movida).
+
+    Devuelve {} si el pipeline no se encuentra o si la respuesta no trae
+    "stages" -- el caller (listar_cotizaciones_abiertas) trata esto como
+    "sin nombre de etapa disponible", NUNCA como error fatal: mostrar la
+    lista de cotizaciones sin el nombre de la etapa es mejor que no
+    mostrarla.
+
+    NOTA -- pendiente de confirmar en vivo (mismo criterio que el resto del
+    proyecto): la forma exacta de la respuesta (si el campo es "pipelines"
+    o algo distinto, y si cada stage trae "id"/"name" con esos nombres
+    exactos). Si esto siempre regresa {} aunque el pipeline sí tenga
+    etapas, es lo primero que hay que revisar."""
+    with httpx.Client(timeout=15) as client:
+        r = client.get(
+            f"{GHL_API_BASE}/opportunities/pipelines",
+            params={"locationId": GHL_LOCATION_ID},
+            headers=_headers(),
+        )
+    if r.status_code >= 300:
+        raise GHLError(f"GHL (obtener pipelines) respondio {r.status_code}: {r.text[:300]}")
+    pipelines = r.json().get("pipelines") or []
+    for pipeline in pipelines:
+        if pipeline.get("id") == pipeline_id:
+            return {
+                etapa.get("id"): etapa.get("name")
+                for etapa in (pipeline.get("stages") or [])
+                if etapa.get("id") and etapa.get("name")
+            }
+    return {}
+
+
 def listar_cotizaciones_abiertas(contact_id: str) -> List[dict]:
     """GET /opportunities/search -- lista las Opportunities ABIERTAS
     (status "open", ni ganadas ni perdidas) del pipeline "cotizaciones
@@ -280,6 +333,38 @@ def listar_cotizaciones_abiertas(contact_id: str) -> List[dict]:
     aunque sepas que hay Opportunities abiertas para ese contacto, revisa
     primero `_contact_id_de_opportunity` (puede que el campo real tenga
     otro nombre que todavía no cubrimos)."""
+    return _buscar_opportunities_pipeline(contact_id, status="open")
+
+
+def listar_polizas_activas(contact_id: str) -> List[dict]:
+    """Igual que listar_cotizaciones_abiertas, pero para pólizas YA
+    EMITIDAS -- Opportunities del mismo pipeline "cotizaciones autos" con
+    status=GHL_STATUS_POLIZA_ACTIVA (por default "won", el status nativo de
+    GHL que se pone solo cuando una Opportunity llega a la etapa
+    "Oportunidad Ganada"). Mismo filtro doble por contactId, mismo criterio
+    de solo lectura -- ver listar_cotizaciones_abiertas.
+
+    PENDIENTE a propósito: todavía no expone el link/PDF de la póliza (ver
+    la nota junto a GHL_STATUS_POLIZA_ACTIVA, arriba) -- ese campo no está
+    definido en GHL todavía. _formatear_polizas_activas() por ahora solo
+    lista el vehículo, sin prometer un PDF."""
+    return _buscar_opportunities_pipeline(contact_id, status=GHL_STATUS_POLIZA_ACTIVA)
+
+
+def _buscar_opportunities_pipeline(contact_id: str, status: str) -> List[dict]:
+    """Logica compartida entre listar_cotizaciones_abiertas (status="open")
+    y listar_polizas_activas (status=GHL_STATUS_POLIZA_ACTIVA) -- misma
+    llamada a GET /opportunities/search, mismo filtro doble por contactId
+    (ver _contact_id_de_opportunity) para nunca mostrarle a un cliente
+    Opportunities de otro contacto.
+
+    Ademas le adjunta a cada Opportunity el nombre legible de su etapa del
+    pipeline (ver obtener_etapas_pipeline) bajo la clave "_etapa_nombre"
+    -- con guion bajo a proposito, para dejar claro que NO es un campo que
+    regrese la API de GHL, es algo que nosotros agregamos aqui mismo. Si
+    obtener_etapas_pipeline falla (red, pipeline no encontrado, etc.), no
+    rompe el listado -- simplemente ninguna Opportunity trae "_etapa_nombre"
+    (el formateador ya sabe tratar eso como "sin etapa disponible")."""
     if not GHL_PIPELINE_COTIZACIONES_AUTOS_ID:
         return []
     with httpx.Client(timeout=15) as client:
@@ -289,20 +374,32 @@ def listar_cotizaciones_abiertas(contact_id: str) -> List[dict]:
                 "location_id": GHL_LOCATION_ID,
                 "pipeline_id": GHL_PIPELINE_COTIZACIONES_AUTOS_ID,
                 "contact_id": contact_id,
-                "status": "open",
+                "status": status,
             },
             headers=_headers(),
         )
     if r.status_code >= 300:
-        raise GHLError(f"GHL (listar cotizaciones abiertas) respondio {r.status_code}: {r.text[:300]}")
+        raise GHLError(f"GHL (buscar opportunities status={status}) respondio {r.status_code}: {r.text[:300]}")
     oportunidades = r.json().get("opportunities") or []
-    return [op for op in oportunidades if _contact_id_de_opportunity(op) == contact_id]
+    propias = [op for op in oportunidades if _contact_id_de_opportunity(op) == contact_id]
+
+    try:
+        etapas = obtener_etapas_pipeline(GHL_PIPELINE_COTIZACIONES_AUTOS_ID)
+    except Exception as e:
+        print(f"[opportunities] no se pudo obtener el nombre de las etapas del pipeline (status={status}): {e}")
+        etapas = {}
+    for op in propias:
+        op["_etapa_nombre"] = etapas.get(op.get("pipelineStageId"))
+
+    return propias
 
 
 def _formatear_cotizaciones_abiertas(oportunidades: List[dict]) -> str:
     """Arma el mensaje de WhatsApp con la lista de Opportunities abiertas
     (ver listar_cotizaciones_abiertas). No asume campos que no confirmamos
-    todavía contra la API real -- usa 'name' y, si viene, 'monetaryValue'."""
+    todavía contra la API real -- usa 'name' y, si vienen, 'monetaryValue'
+    y '_etapa_nombre' (este ultimo agregado por _buscar_opportunities_pipeline,
+    opcional -- si no vino, simplemente no se muestra la etapa)."""
     if not oportunidades:
         return ("No tienes ninguna cotización abierta en este momento. "
                 "¿Quieres cotizar un vehículo? Dime marca, modelo y año.")
@@ -311,9 +408,29 @@ def _formatear_cotizaciones_abiertas(oportunidades: List[dict]) -> str:
         nombre = op.get("name") or "Cotización"
         valor = op.get("monetaryValue")
         detalle = f" -- ${valor:,.2f}" if isinstance(valor, (int, float)) and valor else ""
-        lineas.append(f"{i}. {nombre}{detalle}")
+        etapa = op.get("_etapa_nombre")
+        etapa_txt = f" ({etapa})" if etapa else ""
+        lineas.append(f"{i}. {nombre}{detalle}{etapa_txt}")
     lineas.append("")
     lineas.append("¿Quieres cotizar otro vehículo? Solo dime marca, modelo y año.")
+    return "\n".join(lineas)
+
+
+def _formatear_polizas_activas(oportunidades: List[dict]) -> str:
+    """Arma el mensaje de WhatsApp con las pólizas activas (ver
+    listar_polizas_activas). PENDIENTE a propósito: no incluye el link del
+    PDF -- ese campo todavía no está definido en GHL (ver la nota junto a
+    GHL_STATUS_POLIZA_ACTIVA). Cuando exista, agregarlo aquí igual que
+    'monetaryValue' en _formatear_cotizaciones_abiertas."""
+    if not oportunidades:
+        return ("No tienes ninguna póliza activa registrada todavía. "
+                "¿Quieres cotizar un vehículo? Dime marca, modelo y año.")
+    lineas = ["Estas son tus pólizas activas:"]
+    for i, op in enumerate(oportunidades, 1):
+        nombre = op.get("name") or "Póliza"
+        lineas.append(f"{i}. {nombre}")
+    lineas.append("")
+    lineas.append("Por ahora no puedo mandarte el PDF de la póliza por aquí -- si lo necesitas, pídeselo a tu asesor.")
     return "\n".join(lineas)
 
 
@@ -326,6 +443,18 @@ def _es_listar_cotizaciones(texto: str) -> bool:
         return False
     return any(p in t for p in ("ABIERT", "PROCESO", "PENDIENT", "ESTADO", "MI COTIZACION",
                                  "MIS COTIZACION", "VER COTIZACION", "COMO VA", "COMO VAN"))
+
+
+def _es_listar_polizas(texto: str) -> bool:
+    """Detecta si el cliente esta preguntando por sus polizas YA EMITIDAS
+    (distinto de _es_listar_cotizaciones, que es para las que siguen EN
+    PROCESO) -- comando global, igual nivel que _es_reinicio/
+    _es_listar_cotizaciones."""
+    t = disc.normalizar(texto or "")
+    if "POLIZA" not in t:
+        return False
+    return any(p in t for p in ("ACTIVA", "VIGENTE", "MIS POLIZA", "MI POLIZA", "VER POLIZA",
+                                 "TENGO POLIZA", "COMO VA MI POLIZA", "ESTADO DE MI POLIZA"))
 
 
 def _es_respuesta_botones_cotizacion_ghl(texto: str) -> bool:
@@ -1296,7 +1425,23 @@ def procesar_mensaje_whatsapp(
 
     if _es_reinicio(texto):
         CONVERSACIONES.pop(contact_id, None)
-        return "Listo, empezamos de nuevo. Dime marca, modelo y año del auto."
+        respuesta = "Listo, empezamos de nuevo. Dime marca, modelo y año del auto."
+        # Antes de soltar el reinicio a secas, se avisa (sin bloquear ni
+        # preguntar nada) si el contacto ya tiene cotizaciones abiertas en
+        # GHL -- para que no las pierda de vista por accidente. Si la
+        # consulta falla o no hay ninguna, el mensaje se queda igual que
+        # siempre (comportamiento identico al de antes de este aviso).
+        try:
+            oportunidades_previas = listar_cotizaciones_abiertas(contact_id)
+        except Exception as e:
+            print(f"[reiniciar] fallo consultando cotizaciones abiertas para {contact_id}: {e}")
+            oportunidades_previas = []
+        if oportunidades_previas:
+            n = len(oportunidades_previas)
+            plural = "cotización abierta" if n == 1 else f"{n} cotizaciones abiertas"
+            respuesta += (f"\n\n(Por cierto, todavía tienes {plural} de antes -- escribe "
+                          f"\"cotizaciones abiertas\" si quieres ver el detalle antes de seguir.)")
+        return respuesta
 
     # comando global (igual nivel que _es_reinicio, se revisa ANTES que
     # cualquier fase): el cliente esta respondiendo a los botones nativos
@@ -1325,6 +1470,19 @@ def procesar_mensaje_whatsapp(
             return ("Por el momento no pude consultar el estado de tus cotizaciones -- intenta de "
                      "nuevo en un momento, o dime marca, modelo y año si quieres cotizar un vehículo.")
         return _formatear_cotizaciones_abiertas(oportunidades)
+
+    # comando global (mismo nivel/patron que _es_listar_cotizaciones, pero
+    # para polizas YA EMITIDAS -- status=GHL_STATUS_POLIZA_ACTIVA, ver
+    # listar_polizas_activas). PENDIENTE a proposito: todavia no incluye
+    # el PDF de la poliza, ver la nota junto a GHL_STATUS_POLIZA_ACTIVA.
+    if _es_listar_polizas(texto):
+        try:
+            polizas = listar_polizas_activas(contact_id)
+        except Exception as e:
+            print(f"[listar-polizas] fallo consultando GHL para {contact_id}: {e}")
+            return ("Por el momento no pude consultar tus pólizas activas -- intenta de nuevo en "
+                     "un momento, o dime marca, modelo y año si quieres cotizar un vehículo.")
+        return _formatear_polizas_activas(polizas)
 
     conv = CONVERSACIONES.get(contact_id)
 
