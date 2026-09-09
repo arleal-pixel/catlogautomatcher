@@ -222,6 +222,16 @@ sigue su curso normal, solo que esa en particular no va a poder mostrar
 status intermedios en vivo (sigue funcionando igual que hasta ahora, sin
 status).
 
+**Diagnóstico si ves `followupid=None` en el log** (`[segupoliza] solicitud
+de cotizacion enviada para ... (followupid=None): ...`): significa que
+`crear_registro_cotizacion()` no lanzó ningún error (si lo hubiera hecho,
+verías `[finalizar-datos-conductor] fallo guardando...` justo antes), pero
+GHL respondió 2xx con un JSON que no traía `record.id` donde el código lo
+espera. Busca en el log la línea `[crear-registro-cotizacion] GHL respondio
+... pero sin record.id utilizable ... body crudo: ...` — ahí queda el body
+real que mandó GHL, para poder confirmar su forma exacta (mismo criterio
+del resto del proyecto: nunca asumir la forma de una respuesta sin verla).
+
 ### 3.2 Segupoliza nos manda el status (webhook, MISMA URL que el resultado final)
 
 `POST /cotizador-auto/webhook` — el mismo endpoint que ya existe, NO una URL
@@ -285,21 +295,25 @@ payload — revisa los logs (busca `[segupoliza-status]`).
 ### 3.3 Cómo lo usa el bot
 
 **Push PROACTIVO por WhatsApp (decisión confirmada del cliente):** en cuanto
-llega un status intermedio, si el contacto correspondiente sigue activo en
-fase `esperando_cotizacion`, el bot le manda el texto **de inmediato** por
-WhatsApp — no espera a que el cliente pregunte. Esto es lo principal del
-mecanismo: el objetivo es que el cliente vea el avance en tiempo real sin
-tener que escribir nada.
+llega un status intermedio, si hay un contacto conocido para ese
+`followupid`, el bot le manda el texto **de inmediato** por WhatsApp — no
+espera a que el cliente pregunte. Esto es lo principal del mecanismo: el
+objetivo es que el cliente vea el avance en tiempo real sin tener que
+escribir nada.
+
+Es un mensaje directo (vía la API de mensajes de GHL, `enviar_whatsapp`),
+**no acoplado a la fase de la conversación del bot ni a la lógica de
+cotización** — se manda sin importar si el contacto sigue en
+`esperando_cotizacion`, ya está en `cotizacion_lista`, o cualquier otra
+fase (confirmado: decisión explícita del cliente, no un descuido).
 
 - La correlación contacto ↔ `followupid` se hace con una búsqueda inversa en
-  `REGISTROS_ACTIVOS` (`ghl_bridge._contact_id_por_followup_id`).
-- Si no hay ningún contacto activo con ese `followupid` (por ejemplo, el
+  `REGISTROS_ACTIVOS` (`ghl_bridge._contact_id_por_followup_id`) — no
+  depende de que exista una entrada en `CONVERSACIONES` para ese contacto.
+- Si no hay ningún contacto conocido con ese `followupid` (por ejemplo, el
   proceso se reinició y `REGISTROS_ACTIVOS` se perdió — ver limitación POC
-  más abajo), o si el contacto ya no está en fase `esperando_cotizacion`
-  (el resultado final ya llegó, o el cliente escribió "reiniciar"/"cancelar"
-  antes), **no se manda nada por WhatsApp** — para no confundirlo con una
-  cotización vieja o ya resuelta. El status igual queda guardado (ver
-  siguiente punto).
+  más abajo), **no se manda nada por WhatsApp** — no hay a quién avisarle.
+  El status igual queda guardado (ver siguiente punto).
 - Si falla el envío del WhatsApp (por lo que sea), no truena: se loggea
   (`[segupoliza-status] fallo mandando el status por WhatsApp a ...`) y el
   webhook igual responde `ok: true` a Segupoliza.

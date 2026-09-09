@@ -211,10 +211,13 @@ def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
     obtener_estado_proceso_cotizacion), lo manda PROACTIVO por WhatsApp al
     contacto correspondiente en cuanto llega -- decision del cliente
     (confirmada), en vez de esperar a que el cliente pregunte. Se manda
-    SOLO si el contacto todavia esta en fase 'esperando_cotizacion' (si ya
-    se resolvio -- resultado final ya llego, o el cliente reinicio/cancelo
-    -- no se manda nada, para no confundir con una cotizacion vieja). Si
-    falla el envio de WhatsApp (o no hay ningun contacto activo con ese
+    SIEMPRE que haya un contacto conocido para ese followup_id
+    (_contact_id_por_followup_id), sin importar en que fase este la
+    conversacion del bot -- es un mensaje directo de WhatsApp (via la API
+    de mensajes de GHL, ver enviar_whatsapp), no depende ni esta acoplado
+    al estado interno de la conversacion ni a la logica de cotizacion
+    (confirmado: decision explicita del cliente, no un descuido). Si falla
+    el envio de WhatsApp (o no hay ningun contacto activo con ese
     followup_id -- puede pasar si el proceso se reinicio, ver limitacion
     POC de REGISTROS_ACTIVOS), no truena: el status igual queda guardado
     para el modo reactivo.
@@ -240,12 +243,17 @@ def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
     print(f"[segupoliza-status] followupid={followup_id}: {texto}")
 
     contact_id = _contact_id_por_followup_id(followup_id)
-    if contact_id and CONVERSACIONES.get(contact_id, {}).get("fase") == "esperando_cotizacion":
+    if contact_id:
+        # se manda SIEMPRE que haya un contacto conocido para este
+        # followup_id, sin importar la fase en la que este la conversacion
+        # del bot -- es un mensaje directo de WhatsApp (via la API de
+        # mensajes de GHL, ver enviar_whatsapp), no depende del estado
+        # interno de la conversacion ni de la logica de cotizacion.
         try:
             enviar_whatsapp(contact_id, texto)
         except Exception as e:
             print(f"[segupoliza-status] fallo mandando el status por WhatsApp a {contact_id}: {e}")
-    elif not contact_id:
+    else:
         print(f"[segupoliza-status] followupid={followup_id}: no encontre ningun contacto activo con este "
               f"followup_id en REGISTROS_ACTIVOS -- solo se guarda para el modo reactivo (ver "
               f"obtener_estado_proceso_cotizacion)")
@@ -803,7 +811,20 @@ def crear_registro_cotizacion(
                          json=body, headers=_headers_objetos())
     if r.status_code >= 300:
         raise GHLError(f"GHL (crear registro) respondio {r.status_code}: {r.text[:300]}")
-    return (r.json().get("record") or {}).get("id")
+    record_id = (r.json().get("record") or {}).get("id")
+    if not record_id:
+        # GHL respondio 2xx (no lanzamos GHLError) pero el JSON no trae
+        # record.id donde lo esperamos -- pasa silenciosamente sin este log
+        # (confirmado en produccion: followupid=None en
+        # "[segupoliza] solicitud de cotizacion enviada..." sin ningun
+        # "[finalizar-datos-conductor] fallo guardando..." antes, porque
+        # aqui no se lanzaba excepcion). Se deja el body crudo en el log
+        # para poder confirmar la forma real de la respuesta la proxima vez
+        # que pase -- mismo criterio que el resto del proyecto: nunca
+        # asumir la forma de una respuesta sin verla.
+        print(f"[crear-registro-cotizacion] GHL respondio {r.status_code} pero sin record.id utilizable "
+              f"para contacto={contact_id} -- body crudo: {r.text[:500]}")
+    return record_id
 
 
 def actualizar_registro_cotizacion(record_id: str, propiedades: Dict[str, str]) -> None:

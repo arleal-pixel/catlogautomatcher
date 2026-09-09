@@ -115,6 +115,12 @@ import ghl_bridge as gb
 # archivo.
 _obtener_datos_conductor_real = gb.obtener_datos_conductor
 
+# idem para crear_registro_cotizacion -- el resto del archivo lo
+# monkeypatchea con lambdas para no llamar a GHL real (ver mas abajo), asi
+# que se guarda la funcion real intacta para la prueba de diagnostico
+# (GHL 2xx sin record.id) al final del archivo.
+_crear_registro_cotizacion_real = gb.crear_registro_cotizacion
+
 # --- _normalizar_telefono ---
 check(gb._normalizar_telefono("+523330079224") == "3330079224", "normaliza +52... a 10 digitos")
 check(gb._normalizar_telefono("523330079224") == "3330079224", "normaliza sin '+' igual")
@@ -593,13 +599,13 @@ check(salida_push_sin_contacto["ok"] is True and len(enviados) == 0,
 check(gb.ESTADOS_COTIZACION_EN_PROCESO.get("rec-huerfano", {}).get("texto") == "Recibimos tu solicitud de cotización.",
       "el status igual queda guardado para el modo reactivo aunque no haya a quien avisarle en vivo")
 
-# --- contacto ya no esta en 'esperando_cotizacion' (resultado final ya llego, o reinicio/cancelo) -> no se manda proactivo ---
+# --- el push NO depende de la fase de la conversacion (confirmado: es un mensaje directo, no acoplado al bot) ---
 enviados.clear()
 gb.CONVERSACIONES["c-push"] = {"fase": "cotizacion_lista", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
 gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push", "status": "generando_pdf"})
-check(len(enviados) == 0,
-      f"si el contacto ya no esta en 'esperando_cotizacion', no se manda el status intermedio -- evita "
-      f"confundir al cliente con una cotizacion ya resuelta o cancelada (obtuvo {enviados})")
+check(len(enviados) == 1 and enviados[0] == ("c-push", "Ya casi está: estamos generando el PDF de tu cotización."),
+      f"el push se manda sin importar la fase de la conversacion del bot -- basta con que haya un "
+      f"contacto conocido para el followup_id (obtuvo {enviados})")
 
 # --- si enviar_whatsapp falla, no truena -- el status igual queda guardado para el modo reactivo ---
 gb.CONVERSACIONES["c-push"] = {"fase": "esperando_cotizacion", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
@@ -612,6 +618,17 @@ check(salida_push_falla["ok"] is True,
       f"si enviar_whatsapp truena al mandar el push proactivo, recibir_status_cotizacion_segupoliza no "
       f"truena, sigue devolviendo ok=True (obtuvo {salida_push_falla})")
 gb.enviar_whatsapp = _enviar_whatsapp_original
+
+# --- ni siquiera hace falta que exista una conversacion (CONVERSACIONES) -- basta con REGISTROS_ACTIVOS ---
+gb.CONVERSACIONES.clear()
+gb.REGISTROS_ACTIVOS.clear()
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+enviados.clear()
+gb.REGISTROS_ACTIVOS["c-push-sin-conv"] = "rec-push-sin-conv"
+gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push-sin-conv", "status": "recibido"})
+check(len(enviados) == 1 and enviados[0] == ("c-push-sin-conv", "Recibimos tu solicitud de cotización."),
+      f"el push funciona aunque no exista entrada en CONVERSACIONES para ese contacto -- solo depende de "
+      f"REGISTROS_ACTIVOS (obtuvo {enviados})")
 
 gb.CONVERSACIONES.clear()
 gb.REGISTROS_ACTIVOS.clear()
@@ -1048,5 +1065,51 @@ finally:
 check(_llamadas_buscar_registro == [("c-cualquiera-canal", "whatsapp")],
       f"obtener_datos_conductor (usado solo por WhatsApp) filtra canal='whatsapp' al buscar "
       f"(obtuvo {_llamadas_buscar_registro})")
+
+# --------------------------------------------------------------------------
+# crear_registro_cotizacion: caso real detectado en produccion -- GHL
+# respondio 2xx (no lanza GHLError) pero el JSON no traia record.id donde
+# se esperaba, y record_id se quedaba en None SIN NINGUN LOG que lo
+# delatara (se via como "followupid=None" en el log de segupoliza, sin
+# ningun "[finalizar-datos-conductor] fallo guardando..." antes). Ahora
+# debe loggear el body crudo para poder confirmar la forma real de la
+# respuesta la proxima vez que pase.
+# --------------------------------------------------------------------------
+
+import io
+import contextlib
+
+class _RespuestaSinRecordId:
+    status_code = 200
+    def json(self):
+        return {"algo_inesperado": True}  # NO trae "record"
+    @property
+    def text(self):
+        return '{"algo_inesperado": true}'
+
+class _ClienteSinRecordIdFalso:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def post(self, *a, **k): return _RespuestaSinRecordId()
+
+gb.GHL_API_TOKEN = "fake-token"
+_httpx_original3 = gb.httpx.Client
+gb.httpx.Client = _ClienteSinRecordIdFalso
+_captura_log = io.StringIO()
+try:
+    with contextlib.redirect_stdout(_captura_log):
+        record_id_faltante = _crear_registro_cotizacion_real("c-sin-record-id", {"clave": "X"}, {"nombre": "Juan"})
+finally:
+    gb.httpx.Client = _httpx_original3
+
+check(record_id_faltante is None,
+      f"si GHL responde 2xx sin record.id utilizable, crear_registro_cotizacion devuelve None sin tronar "
+      f"(obtuvo {record_id_faltante!r})")
+check("crear-registro-cotizacion" in _captura_log.getvalue()
+      and "c-sin-record-id" in _captura_log.getvalue()
+      and "algo_inesperado" in _captura_log.getvalue(),
+      f"ese caso ahora SI deja un log con el body crudo de GHL, para poder diagnosticar la forma real de "
+      f"la respuesta la proxima vez (obtuvo log:\n{_captura_log.getvalue()})")
 
 print("\n=== TODO OK (segupoliza) ===")
