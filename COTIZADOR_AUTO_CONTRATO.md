@@ -284,6 +284,30 @@ payload — revisa los logs (busca `[segupoliza-status]`).
 
 ### 3.3 Cómo lo usa el bot
 
+**Push PROACTIVO por WhatsApp (decisión confirmada del cliente):** en cuanto
+llega un status intermedio, si el contacto correspondiente sigue activo en
+fase `esperando_cotizacion`, el bot le manda el texto **de inmediato** por
+WhatsApp — no espera a que el cliente pregunte. Esto es lo principal del
+mecanismo: el objetivo es que el cliente vea el avance en tiempo real sin
+tener que escribir nada.
+
+- La correlación contacto ↔ `followupid` se hace con una búsqueda inversa en
+  `REGISTROS_ACTIVOS` (`ghl_bridge._contact_id_por_followup_id`).
+- Si no hay ningún contacto activo con ese `followupid` (por ejemplo, el
+  proceso se reinició y `REGISTROS_ACTIVOS` se perdió — ver limitación POC
+  más abajo), o si el contacto ya no está en fase `esperando_cotizacion`
+  (el resultado final ya llegó, o el cliente escribió "reiniciar"/"cancelar"
+  antes), **no se manda nada por WhatsApp** — para no confundirlo con una
+  cotización vieja o ya resuelta. El status igual queda guardado (ver
+  siguiente punto).
+- Si falla el envío del WhatsApp (por lo que sea), no truena: se loggea
+  (`[segupoliza-status] fallo mandando el status por WhatsApp a ...`) y el
+  webhook igual responde `ok: true` a Segupoliza.
+
+**Modo reactivo (respaldo, sigue funcionando igual que antes):** además del
+push proactivo, el último status queda guardado y disponible por si el
+cliente pregunta directamente:
+
 - Si el cliente pregunta por su cotización (comando "cotizaciones abiertas",
   ver sección "Modo Segupoliza → GHL directo" más abajo) y **todavía no
   existe la Opportunity en GHL** (porque Segupoliza sigue trabajando), el

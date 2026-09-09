@@ -174,6 +174,18 @@ def _extraer_campo(data: dict, *claves: str) -> Optional[str]:
     return None
 
 
+def _contact_id_por_followup_id(followup_id: str) -> Optional[str]:
+    """Busqueda inversa en REGISTROS_ACTIVOS (indexado por contact_id, no
+    por followup_id/record_id) -- para saber a quien mandarle el WhatsApp
+    proactivo cuando llega un status intermedio (ver
+    recibir_status_cotizacion_segupoliza). En memoria, mismo tamaño chico
+    que el resto de estos dicts en este POC, una busqueda lineal alcanza."""
+    for contact_id, record_id in REGISTROS_ACTIVOS.items():
+        if record_id == followup_id:
+            return contact_id
+    return None
+
+
 def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
     """Procesa un webhook de STATUS intermedio de Segupoliza (no el resultado final).
 
@@ -195,6 +207,18 @@ def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
         cual, para no bloquear a Segupoliza si agregan un status nuevo
         que no anticipamos).
 
+    Ademas de guardar el status (para el modo reactivo, ver
+    obtener_estado_proceso_cotizacion), lo manda PROACTIVO por WhatsApp al
+    contacto correspondiente en cuanto llega -- decision del cliente
+    (confirmada), en vez de esperar a que el cliente pregunte. Se manda
+    SOLO si el contacto todavia esta en fase 'esperando_cotizacion' (si ya
+    se resolvio -- resultado final ya llego, o el cliente reinicio/cancelo
+    -- no se manda nada, para no confundir con una cotizacion vieja). Si
+    falla el envio de WhatsApp (o no hay ningun contacto activo con ese
+    followup_id -- puede pasar si el proceso se reinicio, ver limitacion
+    POC de REGISTROS_ACTIVOS), no truena: el status igual queda guardado
+    para el modo reactivo.
+
     Devuelve {"ok": bool, "followup_id": str|None, "error": str|None}.
     """
     followup_id = _extraer_campo(payload, "followupid", "followUpId", "followup_id", "FollowupId", "FollowUpId")
@@ -214,6 +238,18 @@ def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
         "actualizado": datetime.now(timezone.utc).isoformat(),
     }
     print(f"[segupoliza-status] followupid={followup_id}: {texto}")
+
+    contact_id = _contact_id_por_followup_id(followup_id)
+    if contact_id and CONVERSACIONES.get(contact_id, {}).get("fase") == "esperando_cotizacion":
+        try:
+            enviar_whatsapp(contact_id, texto)
+        except Exception as e:
+            print(f"[segupoliza-status] fallo mandando el status por WhatsApp a {contact_id}: {e}")
+    elif not contact_id:
+        print(f"[segupoliza-status] followupid={followup_id}: no encontre ningun contacto activo con este "
+              f"followup_id en REGISTROS_ACTIVOS -- solo se guarda para el modo reactivo (ver "
+              f"obtener_estado_proceso_cotizacion)")
+
     return {"ok": True, "followup_id": followup_id, "error": None}
 
 

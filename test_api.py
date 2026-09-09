@@ -518,6 +518,19 @@ d = r.json()
 check(r.status_code == 200 and d["ok"] is False and d["followup_id"] == "rec-status-3",
       f"followupid sin status/mensaje/texto/estado -> ok=False con error claro (obtuvo {d})")
 
+# --- push proactivo end-to-end: con un contacto activo 'esperando_cotizacion', el status SI se manda por WhatsApp ---
+gb.CONVERSACIONES["ghl-push"] = {"fase": "esperando_cotizacion", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
+gb.REGISTROS_ACTIVOS["ghl-push"] = "rec-push-e2e"
+n_enviados_antes_push = len(enviados)
+r = client.post("/cotizador-auto/webhook", json={"followupid": "rec-push-e2e", "status": "buscando_mejor_oferta"})
+d = r.json()
+check(d["ok"] is True and len(enviados) == n_enviados_antes_push + 1
+      and enviados[-1][0] == "ghl-push" and enviados[-1][1] == "Estamos buscando la mejor oferta para ti.",
+      f"con un contacto activo esperando la cotizacion, /cotizador-auto/webhook con followupid+status manda "
+      f"el aviso por WhatsApp de una vez, sin que el cliente pregunte (obtuvo {d}, ultimo enviado={enviados[-1] if enviados else None})")
+gb.CONVERSACIONES.pop("ghl-push", None)
+gb.REGISTROS_ACTIVOS.pop("ghl-push", None)
+
 # marca en el mensaje final de "resuelto"
 client.post("/ghl/webhook", json={"contact_id": "ghl-marca", "mensaje": "corolla 2024"})
 r = client.post("/ghl/webhook", json={"contact_id": "ghl-marca", "mensaje": "xle"})

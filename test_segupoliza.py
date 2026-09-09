@@ -569,6 +569,55 @@ gb.CONVERSACIONES.clear()
 gb.REGISTROS_ACTIVOS.clear()
 gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
 
+# --- recibir_status_cotizacion_segupoliza: push PROACTIVO por WhatsApp (decision confirmada del cliente) ---
+enviados.clear()
+gb.CONVERSACIONES["c-push"] = {"fase": "esperando_cotizacion", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
+gb.REGISTROS_ACTIVOS["c-push"] = "rec-push"
+
+gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push", "status": "cotizando_aseguradoras"})
+check(len(enviados) == 1 and enviados[0] == ("c-push", "Estamos cotizando con las aseguradoras."),
+      f"con un contacto activo esperando la cotizacion, el status se manda PROACTIVO por WhatsApp, sin "
+      f"que el cliente tenga que preguntar (obtuvo {enviados})")
+
+# un segundo status para el mismo followup_id manda un segundo WhatsApp -- no solo el primero
+gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push", "status": "generando_pdf"})
+check(len(enviados) == 2 and enviados[1] == ("c-push", "Ya casi está: estamos generando el PDF de tu cotización."),
+      f"cada status nuevo que llega se manda proactivo, no solo el primero (obtuvo {enviados})")
+
+# --- sin ningun contacto activo con ese followup_id (ej. proceso reiniciado) -> no truena, no manda nada ---
+enviados.clear()
+salida_push_sin_contacto = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-huerfano", "status": "recibido"})
+check(salida_push_sin_contacto["ok"] is True and len(enviados) == 0,
+      f"sin ningun contacto activo con ese followup_id, no truena y no manda WhatsApp (obtuvo "
+      f"{salida_push_sin_contacto}, enviados={enviados})")
+check(gb.ESTADOS_COTIZACION_EN_PROCESO.get("rec-huerfano", {}).get("texto") == "Recibimos tu solicitud de cotización.",
+      "el status igual queda guardado para el modo reactivo aunque no haya a quien avisarle en vivo")
+
+# --- contacto ya no esta en 'esperando_cotizacion' (resultado final ya llego, o reinicio/cancelo) -> no se manda proactivo ---
+enviados.clear()
+gb.CONVERSACIONES["c-push"] = {"fase": "cotizacion_lista", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
+gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push", "status": "generando_pdf"})
+check(len(enviados) == 0,
+      f"si el contacto ya no esta en 'esperando_cotizacion', no se manda el status intermedio -- evita "
+      f"confundir al cliente con una cotizacion ya resuelta o cancelada (obtuvo {enviados})")
+
+# --- si enviar_whatsapp falla, no truena -- el status igual queda guardado para el modo reactivo ---
+gb.CONVERSACIONES["c-push"] = {"fase": "esperando_cotizacion", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
+_enviar_whatsapp_original = gb.enviar_whatsapp
+def _enviar_whatsapp_falla(*a, **k):
+    raise gb.GHLError("simulado: GHL no respondio")
+gb.enviar_whatsapp = _enviar_whatsapp_falla
+salida_push_falla = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push", "status": "recibido"})
+check(salida_push_falla["ok"] is True,
+      f"si enviar_whatsapp truena al mandar el push proactivo, recibir_status_cotizacion_segupoliza no "
+      f"truena, sigue devolviendo ok=True (obtuvo {salida_push_falla})")
+gb.enviar_whatsapp = _enviar_whatsapp_original
+
+gb.CONVERSACIONES.clear()
+gb.REGISTROS_ACTIVOS.clear()
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+enviados.clear()
+
 # --------------------------------------------------------------------------
 # 'reiniciar' avisa (sin bloquear) si el contacto ya tiene cotizaciones
 # abiertas de antes -- ver el comportamiento nuevo en procesar_mensaje_whatsapp.
