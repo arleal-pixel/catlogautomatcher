@@ -500,7 +500,7 @@ r = client.post("/cotizador-auto/webhook", json={"followupid": "rec-status-1", "
 d = r.json()
 check(r.status_code == 200 and d["ok"] is True and d["followup_id"] == "rec-status-1" and d["contact_id"] is None,
       f"/cotizador-auto/webhook con followupid+status enruta al contrato de status intermedio (obtuvo {d})")
-check(gb.ESTADOS_COTIZACION_EN_PROCESO.get("rec-status-1", {}).get("texto") == "Estamos cotizando con las aseguradoras.",
+check(gb.ESTADOS_COTIZACION_EN_PROCESO.get("rec-status-1", {}).get("texto") == "🏢 Estamos cotizando con las aseguradoras.",
       f"el status se guarda traducido al texto en español (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-status-1')})")
 
 # nombre de campo alternativo (followUpId) y texto libre no reconocido -- se usa tal cual
@@ -525,7 +525,7 @@ n_enviados_antes_push = len(enviados)
 r = client.post("/cotizador-auto/webhook", json={"followupid": "rec-push-e2e", "status": "buscando_mejor_oferta"})
 d = r.json()
 check(d["ok"] is True and len(enviados) == n_enviados_antes_push + 1
-      and enviados[-1][0] == "ghl-push" and enviados[-1][1] == "Estamos buscando la mejor oferta para ti.",
+      and enviados[-1][0] == "ghl-push" and enviados[-1][1] == "🔍 Estamos buscando la mejor oferta para ti.",
       f"con un contacto activo esperando la cotizacion, /cotizador-auto/webhook con followupid+status manda "
       f"el aviso por WhatsApp de una vez, sin que el cliente pregunte (obtuvo {d}, ultimo enviado={enviados[-1] if enviados else None})")
 gb.CONVERSACIONES.pop("ghl-push", None)

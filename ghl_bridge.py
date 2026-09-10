@@ -138,23 +138,60 @@ REGISTROS_ACTIVOS: Dict[str, str] = {}
 # le contestamos con el ultimo status recibido, en vez de "no tienes
 # ninguna cotizacion abierta" o dejarlo esperando en silencio.
 #
-# 5 codigos de status sugeridos para el equipo de Segupoliza (pueden mandar
+# Codigos de status conocidos para el equipo de Segupoliza (pueden mandar
 # cualquiera de estos codigos, o directamente el texto en español que
-# quieren que se muestre -- ver recibir_status_cotizacion_segupoliza). Ver
-# tambien COTIZADOR_AUTO_CONTRATO.md para la documentacion completa
-# orientada al programador que integra esto del lado de Segupoliza.
+# quieren que se muestre -- ver recibir_status_cotizacion_segupoliza). Los
+# primeros 5 son los sugeridos originalmente; los 4 de abajo se agregaron
+# despues, al confirmarse en logs reales de produccion que Segupoliza SI
+# los manda (autenticando_usuario, consultando_resultados,
+# generando_prospecto_cotizacion, finalizando_cotizacion). Cada texto trae
+# un emoji para que se vea mejor en WhatsApp -- si Segupoliza manda un
+# codigo que no esta en este diccionario, se intenta "humanizar" el codigo
+# crudo en vez de mostrarlo con guiones_bajos (ver
+# _humanizar_texto_status). Ver tambien COTIZADOR_AUTO_CONTRATO.md para la
+# documentacion completa orientada al programador que integra esto del
+# lado de Segupoliza.
 ESTADOS_PROCESO_COTIZACION: Dict[str, str] = {
-    "recibido": "Recibimos tu solicitud de cotización.",
-    "iniciando_cotizacion": "Estamos iniciando tu cotización.",
-    "cotizando_aseguradoras": "Estamos cotizando con las aseguradoras.",
-    "buscando_mejor_oferta": "Estamos buscando la mejor oferta para ti.",
-    "generando_pdf": "Ya casi está: estamos generando el PDF de tu cotización.",
+    "recibido": "📨 Recibimos tu solicitud de cotización.",
+    "iniciando_cotizacion": "🚀 Estamos iniciando tu cotización.",
+    "autenticando_usuario": "🔐 Estamos verificando tus datos.",
+    "cotizando_aseguradoras": "🏢 Estamos cotizando con las aseguradoras.",
+    "consultando_resultados": "🔎 Estamos consultando los resultados con las aseguradoras.",
+    "buscando_mejor_oferta": "🔍 Estamos buscando la mejor oferta para ti.",
+    "generando_prospecto_cotizacion": "📝 Estamos armando tu cotización.",
+    "finalizando_cotizacion": "✅ Estamos finalizando tu cotización.",
+    "generando_pdf": "📄 Ya casi está: estamos generando el PDF de tu cotización.",
 }
 
 # followup_id (== record_id del Custom Object, ver REGISTROS_ACTIVOS) ->
 # {"texto": str, "codigo": str|None, "actualizado": iso8601 str}.
 # En memoria, misma limitacion POC que CONVERSACIONES/REGISTROS_ACTIVOS.
 ESTADOS_COTIZACION_EN_PROCESO: Dict[str, dict] = {}
+
+# Codigo tipo "snake_case" (solo minusculas/numeros/guion bajo, sin
+# espacios ni acentos) -- si Segupoliza manda uno que no esta en
+# ESTADOS_PROCESO_COTIZACION, se distingue de una oracion en español ya
+# redactada (que puede traer espacios, tildes, mayusculas, puntuacion) con
+# este patron, para decidir si "humanizarlo" (ver _humanizar_texto_status)
+# en vez de mostrarlo crudo con guiones_bajos al cliente.
+_CODIGO_SIN_FORMATO_RE = re.compile(r"^[a-z0-9]+(_[a-z0-9]+)*$")
+
+
+def _humanizar_texto_status(crudo: str) -> str:
+    """Si 'crudo' parece un codigo tipo 'snake_case' (ej.
+    'consultando_resultados') en vez de una oracion en español ya
+    redactada, lo convierte a algo presentable para el cliente -- quita
+    los guiones bajos, pone mayuscula inicial y le agrega un emoji
+    generico de "en proceso", en vez de mandarle el codigo crudo con
+    guiones_bajos por WhatsApp. Si 'crudo' no matchea ese patron (ya trae
+    espacios/tildes/mayusculas -- es texto libre), se regresa tal cual,
+    sin tocarlo."""
+    limpio = crudo.strip()
+    if not _CODIGO_SIN_FORMATO_RE.match(limpio):
+        return crudo
+    legible = limpio.replace("_", " ")
+    legible = legible[:1].upper() + legible[1:]
+    return f"⏳ {legible}..."
 
 
 def _extraer_campo(data: dict, *claves: str) -> Optional[str]:
@@ -241,12 +278,13 @@ def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
       - followupid / followUpId / followup_id / FollowupId: el id que les
         mandamos al iniciar la cotizacion.
       - status / mensaje / texto / estado: o bien uno de los codigos de
-        ESTADOS_PROCESO_COTIZACION ("recibido", "iniciando_cotizacion",
-        "cotizando_aseguradoras", "buscando_mejor_oferta",
-        "generando_pdf"), o directamente el texto en español que quieren
-        mostrar (si no coincide con ningun codigo conocido se usa tal
-        cual, para no bloquear a Segupoliza si agregan un status nuevo
-        que no anticipamos).
+        ESTADOS_PROCESO_COTIZACION (ver ese diccionario para la lista
+        completa, cada uno con su texto+emoji ya redactado), o
+        directamente el texto en español que quieren mostrar. Si el
+        codigo no esta en el diccionario, se intenta "humanizar" (ver
+        _humanizar_texto_status) en vez de mostrarlo crudo con
+        guiones_bajos -- para no bloquear a Segupoliza si agregan un
+        status nuevo que no anticipamos.
 
     Ademas de guardar el status (para el modo reactivo, ver
     obtener_estado_proceso_cotizacion), lo manda PROACTIVO por WhatsApp al
@@ -274,7 +312,7 @@ def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
         return {"ok": False, "followup_id": followup_id, "error": "Falta status/mensaje/texto/estado en el payload."}
 
     codigo_normalizado = crudo.strip().lower().replace(" ", "_")
-    texto = ESTADOS_PROCESO_COTIZACION.get(codigo_normalizado, crudo)
+    texto = ESTADOS_PROCESO_COTIZACION.get(codigo_normalizado) or _humanizar_texto_status(crudo)
 
     ESTADOS_COTIZACION_EN_PROCESO[followup_id] = {
         "texto": texto,

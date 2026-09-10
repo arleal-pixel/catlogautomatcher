@@ -272,18 +272,40 @@ mayúsculas/espacios/guiones bajos — se normalizan antes de compararlos) y el
 bot lo traduce automáticamente a un mensaje en español ya redactado para el
 cliente:
 
-| Código que manda Segupoliza   | Mensaje que recibe el cliente por WhatsApp                          |
-|--------------------------------|-----------------------------------------------------------------------|
-| `recibido`                     | Recibimos tu solicitud de cotización.                                |
-| `iniciando_cotizacion`          | Estamos iniciando tu cotización.                                     |
-| `cotizando_aseguradoras`        | Estamos cotizando con las aseguradoras.                              |
-| `buscando_mejor_oferta`         | Estamos buscando la mejor oferta para ti.                            |
-| `generando_pdf`                 | Ya casi está: estamos generando el PDF de tu cotización.             |
+| Código que manda Segupoliza        | Mensaje que recibe el cliente por WhatsApp                              |
+|-------------------------------------|----------------------------------------------------------------------------|
+| `recibido`                          | 📨 Recibimos tu solicitud de cotización.                                  |
+| `iniciando_cotizacion`               | 🚀 Estamos iniciando tu cotización.                                       |
+| `autenticando_usuario`               | 🔐 Estamos verificando tus datos.                                         |
+| `cotizando_aseguradoras`             | 🏢 Estamos cotizando con las aseguradoras.                                |
+| `consultando_resultados`             | 🔎 Estamos consultando los resultados con las aseguradoras.               |
+| `buscando_mejor_oferta`              | 🔍 Estamos buscando la mejor oferta para ti.                              |
+| `generando_prospecto_cotizacion`     | 📝 Estamos armando tu cotización.                                         |
+| `finalizando_cotizacion`             | ✅ Estamos finalizando tu cotización.                                     |
+| `generando_pdf`                      | 📄 Ya casi está: estamos generando el PDF de tu cotización.               |
+
+Los primeros 5 fueron los sugeridos originalmente; los otros 4
+(`autenticando_usuario`, `consultando_resultados`,
+`generando_prospecto_cotizacion`, `finalizando_cotizacion`) se agregaron
+después, al confirmarse en logs reales de producción que Segupoliza los
+manda como parte de su flujo normal.
 
 Esta lista vive en `ghl_bridge.ESTADOS_PROCESO_COTIZACION` (un diccionario
 simple `codigo -> texto`) — si más adelante Segupoliza quiere agregar o
 renombrar códigos, basta con editar ese diccionario, no hace falta tocar
 nada más del flujo.
+
+**Si Segupoliza manda un código que no está en esa lista:** en vez de
+mostrarlo crudo con guiones_bajos (ej. `consultando_resultados_finales`),
+el bot lo "humaniza" automáticamente antes de mandarlo por WhatsApp — le
+quita los guiones bajos, pone mayúscula inicial y le agrega un emoji
+genérico de "en proceso" (⏳), por ejemplo: *"⏳ Consultando resultados
+finales..."*. Esto SOLO aplica si el texto recibido tiene forma de código
+(minúsculas, números y guiones bajos, sin espacios ni tildes/mayúsculas).
+Si en cambio Segupoliza manda directamente una oración en español ya
+redactada (con espacios, tildes o mayúsculas — como *"Ya casi
+terminamos"*), se manda tal cual, sin tocarla. Ver
+`ghl_bridge._humanizar_texto_status`.
 
 **Si Segupoliza manda un código que NO está en esa lista de 5** (por
 ejemplo, porque agregaron un paso nuevo que no anticipamos), el bot NO lo

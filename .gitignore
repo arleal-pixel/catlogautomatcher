@@ -1,5 +1,29 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
 .DS_Store
-data/tablotas/default.csv
-data/tablotas/default.csv
-data/tablotas/default.csv
-data/tablotas/default.csv
+
+# Cache de pytest -- artefactos de correr los tests localmente, no es
+# parte del deliverable.
+.pytest_cache/
+
+# Tablotas: catalogo de vehiculos/claves del asegurador -- son datos de
+# negocio confidenciales, no van al repo publico. Sube la tuya via
+# POST /tablotas o coloca el CSV a mano en data/tablotas/ (queda ignorado
+# salvo el .gitkeep).
+data/tablotas/*.csv
+!data/tablotas/.gitkeep
+
+# Idioma(s) de tesseract si se instalan localmente en esta carpeta.
+tessdata/
+
+# Tarjetas de circulacion sinteticas usadas para probar el OCR a mano
+# durante el desarrollo -- no forman parte del deliverable.
+mock_tarjeta*.png
+mock_tarjeta*.pdf
+
+# Zips de entrega generados durante el desarrollo -- son historial de
+# paquetes, no codigo fuente; el repo ya tiene el historial via git.
+*.zip

@@ -504,30 +504,69 @@ _httpx_original_status_section = gb.httpx.Client
 gb.GHL_API_TOKEN = "fake-token"
 gb.httpx.Client = _ClienteGetRecord404PorDefault
 
-# --- ESTADOS_PROCESO_COTIZACION: los 5 codigos sugeridos existen ---
+# --- ESTADOS_PROCESO_COTIZACION: los codigos documentados existen, cada uno con su emoji ---
 check(set(gb.ESTADOS_PROCESO_COTIZACION.keys()) == {
-    "recibido", "iniciando_cotizacion", "cotizando_aseguradoras", "buscando_mejor_oferta", "generando_pdf",
-}, f"los 5 codigos sugeridos existen tal cual se documentaron (obtuvo {sorted(gb.ESTADOS_PROCESO_COTIZACION.keys())})")
+    "recibido", "iniciando_cotizacion", "autenticando_usuario", "cotizando_aseguradoras",
+    "consultando_resultados", "buscando_mejor_oferta", "generando_prospecto_cotizacion",
+    "finalizando_cotizacion", "generando_pdf",
+}, f"los codigos documentados existen tal cual (obtuvo {sorted(gb.ESTADOS_PROCESO_COTIZACION.keys())})")
+check(all(texto[0] not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+          for texto in gb.ESTADOS_PROCESO_COTIZACION.values()),
+      f"cada texto empieza con un emoji, no con una letra (obtuvo {gb.ESTADOS_PROCESO_COTIZACION})")
+
+# --- los 4 codigos reales confirmados en logs de produccion (no estaban en la lista original de 5) ---
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+for codigo_real, esperado_fragmento in [
+    ("autenticando_usuario", "verificando tus datos"),
+    ("consultando_resultados", "consultando los resultados"),
+    ("generando_prospecto_cotizacion", "armando tu cotización"),
+    ("finalizando_cotizacion", "finalizando tu cotización"),
+]:
+    salida_real = gb.recibir_status_cotizacion_segupoliza({"followupid": f"rec-{codigo_real}", "status": codigo_real})
+    texto_guardado = gb.ESTADOS_COTIZACION_EN_PROCESO.get(f"rec-{codigo_real}", {}).get("texto", "")
+    check(salida_real["ok"] is True and esperado_fragmento in texto_guardado,
+          f"el codigo real '{codigo_real}' (visto en logs de produccion) esta mapeado a un texto con emoji "
+          f"(obtuvo {texto_guardado!r})")
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
 
 # --- recibir_status_cotizacion_segupoliza: codigo conocido -> se traduce y se guarda ---
 gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
 salida_status = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-a", "status": "recibido"})
 check(salida_status == {"ok": True, "followup_id": "rec-a", "error": None},
       f"recibir_status_cotizacion_segupoliza con codigo conocido devuelve ok=True (obtuvo {salida_status})")
-check(gb.ESTADOS_COTIZACION_EN_PROCESO["rec-a"]["texto"] == "Recibimos tu solicitud de cotización.",
+check(gb.ESTADOS_COTIZACION_EN_PROCESO["rec-a"]["texto"] == "📨 Recibimos tu solicitud de cotización.",
       f"el codigo 'recibido' se traduce al texto documentado (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO['rec-a']})")
 
 # variante de mayusculas/espacios en el codigo -- se normaliza antes de comparar
 salida_status2 = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-b", "estado": "Cotizando Aseguradoras"})
 check(salida_status2["ok"] is True
-      and gb.ESTADOS_COTIZACION_EN_PROCESO["rec-b"]["texto"] == "Estamos cotizando con las aseguradoras.",
+      and gb.ESTADOS_COTIZACION_EN_PROCESO["rec-b"]["texto"] == "🏢 Estamos cotizando con las aseguradoras.",
       f"un codigo con mayusculas/espacios se normaliza igual (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-b')})")
 
 # codigo NO reconocido -> se usa el texto tal cual, sin bloquear
 salida_status3 = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-c", "texto": "Paso nuevo no anticipado"})
 check(salida_status3["ok"] is True
       and gb.ESTADOS_COTIZACION_EN_PROCESO["rec-c"]["texto"] == "Paso nuevo no anticipado",
-      f"un status no reconocido se guarda tal cual (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-c')})")
+      f"un status no reconocido que YA es una oracion en español (con espacios) se guarda tal cual, sin "
+      f"tocarlo (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-c')})")
+
+# --- un codigo NO reconocido pero con forma de codigo (snake_case, sin espacios) se "humaniza" en vez de mostrarse crudo ---
+salida_status_humanizado = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-humanizado", "status": "consultando_resultados_finales"})
+check(salida_status_humanizado["ok"] is True
+      and gb.ESTADOS_COTIZACION_EN_PROCESO["rec-humanizado"]["texto"] == "⏳ Consultando resultados finales...",
+      f"un codigo tipo snake_case que NO esta en ESTADOS_PROCESO_COTIZACION se humaniza (sin guiones_bajos, "
+      f"con mayuscula inicial y emoji) en vez de mostrarse crudo (obtuvo "
+      f"{gb.ESTADOS_COTIZACION_EN_PROCESO.get('rec-humanizado')})")
+check(gb.ESTADOS_COTIZACION_EN_PROCESO["rec-humanizado"]["codigo"] is None,
+      "un codigo humanizado NO cuenta como 'codigo conocido' en el registro guardado")
+
+# --- _humanizar_texto_status: un solo llamado directo, casos borde ---
+check(gb._humanizar_texto_status("recibido") == "⏳ Recibido...",
+      f"un codigo de una sola palabra tambien se humaniza (obtuvo {gb._humanizar_texto_status('recibido')!r})")
+check(gb._humanizar_texto_status("Ya casi terminamos, un momento") == "Ya casi terminamos, un momento",
+      "un texto libre con espacios/mayusculas/comas NO se toca -- ya es una oracion en español")
+check(gb._humanizar_texto_status("Buscando la mejor oferta") == "Buscando la mejor oferta",
+      "un texto con espacios y mayusculas (aunque no tenga puntuacion) tampoco se toca")
 
 # nombres de campo alternativos para followupid
 salida_status4 = gb.recibir_status_cotizacion_segupoliza({"followUpId": "rec-d", "mensaje": "en proceso"})
@@ -546,7 +585,7 @@ check(salida_status6["ok"] is False and salida_status6["followup_id"] == "rec-e"
 
 # un status nuevo pisa al anterior para el mismo followupid
 gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-a", "status": "generando_pdf"})
-check(gb.ESTADOS_COTIZACION_EN_PROCESO["rec-a"]["texto"] == "Ya casi está: estamos generando el PDF de tu cotización.",
+check(gb.ESTADOS_COTIZACION_EN_PROCESO["rec-a"]["texto"] == "📄 Ya casi está: estamos generando el PDF de tu cotización.",
       f"un status nuevo para el mismo followupid pisa al anterior (obtuvo {gb.ESTADOS_COTIZACION_EN_PROCESO['rec-a']})")
 
 # --- obtener_estado_proceso_cotizacion: usa REGISTROS_ACTIVOS para encontrar el followup_id del contacto ---
@@ -560,7 +599,7 @@ check(gb.obtener_estado_proceso_cotizacion("c-status") is None,
       "hay contacto activo pero todavia no llego ningun status intermedio -> None")
 
 gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-status-activo", "status": "buscando_mejor_oferta"})
-check(gb.obtener_estado_proceso_cotizacion("c-status") == "Estamos buscando la mejor oferta para ti.",
+check(gb.obtener_estado_proceso_cotizacion("c-status") == "🔍 Estamos buscando la mejor oferta para ti.",
       f"con status ya recibido, obtener_estado_proceso_cotizacion devuelve el texto mas reciente "
       f"(obtuvo {gb.obtener_estado_proceso_cotizacion('c-status')!r})")
 
@@ -603,13 +642,13 @@ gb.CONVERSACIONES["c-push"] = {"fase": "esperando_cotizacion", "vehiculo": {"mar
 gb.REGISTROS_ACTIVOS["c-push"] = "rec-push"
 
 gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push", "status": "cotizando_aseguradoras"})
-check(len(enviados) == 1 and enviados[0] == ("c-push", "Estamos cotizando con las aseguradoras."),
+check(len(enviados) == 1 and enviados[0] == ("c-push", "🏢 Estamos cotizando con las aseguradoras."),
       f"con un contacto activo esperando la cotizacion, el status se manda PROACTIVO por WhatsApp, sin "
       f"que el cliente tenga que preguntar (obtuvo {enviados})")
 
 # un segundo status para el mismo followup_id manda un segundo WhatsApp -- no solo el primero
 gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push", "status": "generando_pdf"})
-check(len(enviados) == 2 and enviados[1] == ("c-push", "Ya casi está: estamos generando el PDF de tu cotización."),
+check(len(enviados) == 2 and enviados[1] == ("c-push", "📄 Ya casi está: estamos generando el PDF de tu cotización."),
       f"cada status nuevo que llega se manda proactivo, no solo el primero (obtuvo {enviados})")
 
 # --- sin ningun contacto activo con ese followup_id (ej. proceso reiniciado) -> no truena, no manda nada ---
@@ -618,14 +657,14 @@ salida_push_sin_contacto = gb.recibir_status_cotizacion_segupoliza({"followupid"
 check(salida_push_sin_contacto["ok"] is True and len(enviados) == 0,
       f"sin ningun contacto activo con ese followup_id, no truena y no manda WhatsApp (obtuvo "
       f"{salida_push_sin_contacto}, enviados={enviados})")
-check(gb.ESTADOS_COTIZACION_EN_PROCESO.get("rec-huerfano", {}).get("texto") == "Recibimos tu solicitud de cotización.",
+check(gb.ESTADOS_COTIZACION_EN_PROCESO.get("rec-huerfano", {}).get("texto") == "📨 Recibimos tu solicitud de cotización.",
       "el status igual queda guardado para el modo reactivo aunque no haya a quien avisarle en vivo")
 
 # --- el push NO depende de la fase de la conversacion (confirmado: es un mensaje directo, no acoplado al bot) ---
 enviados.clear()
 gb.CONVERSACIONES["c-push"] = {"fase": "cotizacion_lista", "vehiculo": {"marca": "VW"}, "actualizado": "z"}
 gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push", "status": "generando_pdf"})
-check(len(enviados) == 1 and enviados[0] == ("c-push", "Ya casi está: estamos generando el PDF de tu cotización."),
+check(len(enviados) == 1 and enviados[0] == ("c-push", "📄 Ya casi está: estamos generando el PDF de tu cotización."),
       f"el push se manda sin importar la fase de la conversacion del bot -- basta con que haya un "
       f"contacto conocido para el followup_id (obtuvo {enviados})")
 
@@ -648,7 +687,7 @@ gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
 enviados.clear()
 gb.REGISTROS_ACTIVOS["c-push-sin-conv"] = "rec-push-sin-conv"
 gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-push-sin-conv", "status": "recibido"})
-check(len(enviados) == 1 and enviados[0] == ("c-push-sin-conv", "Recibimos tu solicitud de cotización."),
+check(len(enviados) == 1 and enviados[0] == ("c-push-sin-conv", "📨 Recibimos tu solicitud de cotización."),
       f"el push funciona aunque no exista entrada en CONVERSACIONES para ese contacto -- solo depende de "
       f"REGISTROS_ACTIVOS (obtuvo {enviados})")
 
@@ -729,7 +768,7 @@ finally:
     gb.httpx.Client = _httpx_original4
 check(salida_respaldo["ok"] is True,
       f"con el respaldo de GHL, recibir_status_cotizacion_segupoliza sigue devolviendo ok=True (obtuvo {salida_respaldo})")
-check(len(enviados) == 1 and enviados[0] == ("c-recuperado-de-ghl", "Recibimos tu solicitud de cotización."),
+check(len(enviados) == 1 and enviados[0] == ("c-recuperado-de-ghl", "📨 Recibimos tu solicitud de cotización."),
       f"aunque REGISTROS_ACTIVOS no tenia el followup_id, el respaldo de GHL SI encuentra al contacto y le "
       f"manda el WhatsApp (obtuvo {enviados})")
 check(gb.REGISTROS_ACTIVOS.get("c-recuperado-de-ghl") == "rec-perdido",
