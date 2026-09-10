@@ -222,6 +222,18 @@ sigue su curso normal, solo que esa en particular no va a poder mostrar
 status intermedios en vivo (sigue funcionando igual que hasta ahora, sin
 status).
 
+**Diagnóstico si ves `no encontre ningun contacto (ni en REGISTROS_ACTIVOS
+ni consultando GHL directo)` en el log:** esto es mucho más raro que el
+caso normal (el respaldo a GHL descrito arriba resuelve la gran mayoría de
+los casos donde `REGISTROS_ACTIVOS` se perdió). Si aun así pasa, revisa en
+Railway (Settings del servicio) si hay **más de una réplica/instancia**
+configurada para la app — si las hay, cada una tiene su propia memoria y
+eso puede seguir causando corrimientos en `REGISTROS_ACTIVOS` en la ventana
+entre que se crea el registro y que se consulta. Con una sola réplica, la
+única causa posible sería que el registro en GHL tampoco tenga la
+propiedad `contacto` guardada (poco probable, se guarda siempre al crear
+el registro — ver `crear_registro_cotizacion`).
+
 **Diagnóstico si ves `followupid=None` en el log** (`[segupoliza] solicitud
 de cotizacion enviada para ... (followupid=None): ...`): significa que
 `crear_registro_cotizacion()` no lanzó ningún error (si lo hubiera hecho,
@@ -310,10 +322,21 @@ fase (confirmado: decisión explícita del cliente, no un descuido).
 - La correlación contacto ↔ `followupid` se hace con una búsqueda inversa en
   `REGISTROS_ACTIVOS` (`ghl_bridge._contact_id_por_followup_id`) — no
   depende de que exista una entrada en `CONVERSACIONES` para ese contacto.
-- Si no hay ningún contacto conocido con ese `followupid` (por ejemplo, el
-  proceso se reinició y `REGISTROS_ACTIVOS` se perdió — ver limitación POC
-  más abajo), **no se manda nada por WhatsApp** — no hay a quién avisarle.
-  El status igual queda guardado (ver siguiente punto).
+- **Respaldo confirmado en producción:** si `REGISTROS_ACTIVOS` no tiene el
+  `followupid` (puede pasar si el proceso se reinició, o si hay más de una
+  réplica corriendo — cada una con su propia memoria — entre que se mandó
+  la cotización y que llegó el primer status; caso real ya visto en logs),
+  se consulta **directo en GHL** (`GET
+  /objects/{schemaKey}/records/{followupid}` — `followupid` ES el id de
+  ese registro, ver `ghl_bridge._contact_id_por_followup_id_en_ghl`) y se
+  lee la propiedad `contacto` que se guardó ahí al crear el registro. Si lo
+  encuentra, se recupera la entrada en `REGISTROS_ACTIVOS` para no tener
+  que volver a consultar GHL en el siguiente status de esa misma
+  cotización.
+- Si ni `REGISTROS_ACTIVOS` ni la consulta directa a GHL encuentran un
+  contacto para ese `followupid`, **no se manda nada por WhatsApp** — no
+  hay a quién avisarle. El status igual queda guardado (ver siguiente
+  punto).
 - Si falla el envío del WhatsApp (por lo que sea), no truena: se loggea
   (`[segupoliza-status] fallo mandando el status por WhatsApp a ...`) y el
   webhook igual responde `ok: true` a Segupoliza.

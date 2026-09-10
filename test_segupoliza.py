@@ -482,6 +482,28 @@ check("no pude consultar el estado" in respuesta_error.lower(),
 # COTIZADOR_AUTO_CONTRATO.md seccion "Status intermedio de cotización".
 # --------------------------------------------------------------------------
 
+# recibir_status_cotizacion_segupoliza ahora puede llamar a GHL como
+# respaldo cuando REGISTROS_ACTIVOS no tiene el followup_id (ver
+# _contact_id_por_followup_id_en_ghl) -- se deja un fake "404 rapido" como
+# default durante TODA esta seccion, para que ninguna de estas pruebas
+# intente una llamada de red real por accidente (las pruebas especificas
+# del respaldo, mas abajo, ponen su propio fake segun el caso que quieren
+# probar).
+class _ClienteGetRecord404PorDefault:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def get(self, *a, **k):
+        class _R:
+            status_code = 404
+            text = "not found"
+            def json(self): return {}
+        return _R()
+
+_httpx_original_status_section = gb.httpx.Client
+gb.GHL_API_TOKEN = "fake-token"
+gb.httpx.Client = _ClienteGetRecord404PorDefault
+
 # --- ESTADOS_PROCESO_COTIZACION: los 5 codigos sugeridos existen ---
 check(set(gb.ESTADOS_PROCESO_COTIZACION.keys()) == {
     "recibido", "iniciando_cotizacion", "cotizando_aseguradoras", "buscando_mejor_oferta", "generando_pdf",
@@ -634,6 +656,105 @@ gb.CONVERSACIONES.clear()
 gb.REGISTROS_ACTIVOS.clear()
 gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
 enviados.clear()
+
+# --------------------------------------------------------------------------
+# Respaldo real confirmado en produccion: REGISTROS_ACTIVOS perdio la
+# entrada del followup_id (proceso reiniciado / mas de una replica --
+# ver limitacion POC) entre que se mando la cotizacion y que llego el
+# primer status intermedio. _contact_id_por_followup_id_en_ghl consulta
+# GHL directo (fuente de verdad durable) como respaldo.
+# --------------------------------------------------------------------------
+
+class _RespuestaRegistroPorId:
+    def __init__(self, status_code=200, contacto="c-recuperado-de-ghl"):
+        self.status_code = status_code
+        self._contacto = contacto
+    def json(self):
+        if self.status_code >= 300:
+            return {}
+        return {"record": {"id": "rec-perdido", "properties": {"contacto": self._contacto}}}
+    @property
+    def text(self):
+        return "not found"
+
+class _ClienteGetRecordFalso:
+    def __init__(self, respuesta):
+        self._respuesta = respuesta
+    def __call__(self, *a, **k):
+        return self
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def get(self, url, *a, **k):
+        self._ultima_url = url
+        return self._respuesta
+
+gb.GHL_API_TOKEN = "fake-token"
+_httpx_original4 = gb.httpx.Client
+
+# --- _obtener_registro_por_id: exito ---
+gb.httpx.Client = _ClienteGetRecordFalso(_RespuestaRegistroPorId())
+try:
+    registro = gb._obtener_registro_por_id("rec-perdido")
+finally:
+    gb.httpx.Client = _httpx_original4
+check(registro == {"id": "rec-perdido", "properties": {"contacto": "c-recuperado-de-ghl"}},
+      f"_obtener_registro_por_id devuelve el registro completo tal cual lo manda GHL (obtuvo {registro})")
+
+# --- _obtener_registro_por_id: 404 (no existe) -> None, sin tronar ---
+gb.httpx.Client = _ClienteGetRecordFalso(_RespuestaRegistroPorId(status_code=404))
+try:
+    registro_404 = gb._obtener_registro_por_id("rec-no-existe")
+finally:
+    gb.httpx.Client = _httpx_original4
+check(registro_404 is None, f"si GHL responde 404, _obtener_registro_por_id devuelve None sin tronar (obtuvo {registro_404})")
+
+# --- _contact_id_por_followup_id_en_ghl: exito -> lee properties.contacto ---
+gb.httpx.Client = _ClienteGetRecordFalso(_RespuestaRegistroPorId(contacto="c-recuperado-de-ghl"))
+try:
+    contact_id_recuperado = gb._contact_id_por_followup_id_en_ghl("rec-perdido")
+finally:
+    gb.httpx.Client = _httpx_original4
+check(contact_id_recuperado == "c-recuperado-de-ghl",
+      f"_contact_id_por_followup_id_en_ghl lee properties.contacto del registro (obtuvo {contact_id_recuperado!r})")
+
+# --- integrado: recibir_status_cotizacion_segupoliza cae al respaldo de GHL cuando REGISTROS_ACTIVOS no tiene el followup_id ---
+gb.CONVERSACIONES.clear()
+gb.REGISTROS_ACTIVOS.clear()
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+enviados.clear()
+gb.httpx.Client = _ClienteGetRecordFalso(_RespuestaRegistroPorId(contacto="c-recuperado-de-ghl"))
+try:
+    salida_respaldo = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-perdido", "status": "recibido"})
+finally:
+    gb.httpx.Client = _httpx_original4
+check(salida_respaldo["ok"] is True,
+      f"con el respaldo de GHL, recibir_status_cotizacion_segupoliza sigue devolviendo ok=True (obtuvo {salida_respaldo})")
+check(len(enviados) == 1 and enviados[0] == ("c-recuperado-de-ghl", "Recibimos tu solicitud de cotización."),
+      f"aunque REGISTROS_ACTIVOS no tenia el followup_id, el respaldo de GHL SI encuentra al contacto y le "
+      f"manda el WhatsApp (obtuvo {enviados})")
+check(gb.REGISTROS_ACTIVOS.get("c-recuperado-de-ghl") == "rec-perdido",
+      f"tras usar el respaldo, se recupera la entrada en REGISTROS_ACTIVOS -- para no volver a consultar "
+      f"GHL en el siguiente status de esta misma cotizacion (obtuvo {gb.REGISTROS_ACTIVOS.get('c-recuperado-de-ghl')})")
+
+# --- ni en REGISTROS_ACTIVOS ni en GHL (registro no existe / sin properties.contacto) -> no truena, no manda nada ---
+gb.CONVERSACIONES.clear()
+gb.REGISTROS_ACTIVOS.clear()
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+enviados.clear()
+gb.httpx.Client = _ClienteGetRecordFalso(_RespuestaRegistroPorId(status_code=404))
+try:
+    salida_sin_nadie = gb.recibir_status_cotizacion_segupoliza({"followupid": "rec-fantasma", "status": "recibido"})
+finally:
+    gb.httpx.Client = _httpx_original4
+check(salida_sin_nadie["ok"] is True and len(enviados) == 0,
+      f"si ni REGISTROS_ACTIVOS ni GHL tienen el followup_id, no truena y no manda nada -- el status igual "
+      f"queda guardado para el modo reactivo (obtuvo {salida_sin_nadie}, enviados={enviados})")
+
+gb.CONVERSACIONES.clear()
+gb.REGISTROS_ACTIVOS.clear()
+gb.ESTADOS_COTIZACION_EN_PROCESO.clear()
+enviados.clear()
+gb.httpx.Client = _httpx_original_status_section  # fin de la seccion -- deja httpx.Client como estaba
 
 # --------------------------------------------------------------------------
 # 'reiniciar' avisa (sin bloquear) si el contacto ya tiene cotizaciones

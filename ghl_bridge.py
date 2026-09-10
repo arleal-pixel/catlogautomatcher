@@ -186,6 +186,47 @@ def _contact_id_por_followup_id(followup_id: str) -> Optional[str]:
     return None
 
 
+def _obtener_registro_por_id(record_id: str) -> Optional[dict]:
+    """GET /objects/{schemaKey}/records/{recordId} -- consulta DIRECTA en
+    GHL por el id del registro (a diferencia de buscar_registro_conductor,
+    que busca por texto/contacto). Se usa como respaldo cuando
+    REGISTROS_ACTIVOS no tiene el followup_id -- ver
+    _contact_id_por_followup_id_en_ghl. Devuelve el registro completo
+    (con "properties"), o None si no existe o falla la consulta."""
+    url = f"{GHL_API_BASE}/objects/{GHL_OBJETO_SCHEMA_KEY}/records/{record_id}"
+    with httpx.Client(timeout=15) as client:
+        r = client.get(url, params={"locationId": GHL_LOCATION_ID}, headers=_headers_objetos())
+    if r.status_code >= 300:
+        print(f"[ghl-get-record] no pude consultar el registro {record_id}: {r.status_code} {r.text[:200]}")
+        return None
+    return r.json().get("record")
+
+
+def _contact_id_por_followup_id_en_ghl(followup_id: str) -> Optional[str]:
+    """Respaldo cuando REGISTROS_ACTIVOS no tiene (o PERDIO) la entrada
+    para este followup_id -- caso real confirmado en produccion: el
+    proceso se reinicio (o hay mas de una replica corriendo, cada una con
+    su propia memoria -- ver limitacion POC) entre que se mando la
+    cotizacion y que llego el primer status intermedio, asi que la
+    busqueda en memoria (_contact_id_por_followup_id) no encontro nada.
+
+    followup_id ES el id del registro del Custom Object (record_id, ver
+    crear_registro_cotizacion/_finalizar_datos_conductor), asi que se
+    puede consultar DIRECTO en GHL (fuente de verdad durable, a diferencia
+    del dict en memoria) y leer la propiedad "contacto" que se guardo ahi
+    al crear el registro. Devuelve None si el registro no existe, no trae
+    "contacto", o falla la consulta -- no truena en ningun caso."""
+    try:
+        registro = _obtener_registro_por_id(followup_id)
+    except Exception as e:
+        print(f"[segupoliza-status] fallo consultando el registro {followup_id} en GHL como respaldo: {e}")
+        return None
+    if not registro:
+        return None
+    contacto = (registro.get("properties") or {}).get("contacto")
+    return str(contacto) if contacto else None
+
+
 def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
     """Procesa un webhook de STATUS intermedio de Segupoliza (no el resultado final).
 
@@ -243,6 +284,22 @@ def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
     print(f"[segupoliza-status] followupid={followup_id}: {texto}")
 
     contact_id = _contact_id_por_followup_id(followup_id)
+    if not contact_id:
+        # respaldo: REGISTROS_ACTIVOS no tiene esta entrada -- puede que
+        # el proceso se haya reiniciado, o que haya mas de una replica
+        # corriendo (caso real confirmado en produccion). Se consulta
+        # directo en GHL antes de rendirse -- ver
+        # _contact_id_por_followup_id_en_ghl.
+        contact_id = _contact_id_por_followup_id_en_ghl(followup_id)
+        if contact_id:
+            print(f"[segupoliza-status] followupid={followup_id}: no estaba en REGISTROS_ACTIVOS (memoria) pero "
+                  f"SI lo encontre consultando GHL directo -- contact_id={contact_id}")
+            # se recupera la entrada para no tener que volver a consultar
+            # GHL en el siguiente status de esta misma cotizacion, y para
+            # que el modo reactivo (obtener_estado_proceso_cotizacion)
+            # tambien vuelva a funcionar para este contacto.
+            REGISTROS_ACTIVOS[contact_id] = followup_id
+
     if contact_id:
         # se manda SIEMPRE que haya un contacto conocido para este
         # followup_id, sin importar la fase en la que este la conversacion
@@ -254,8 +311,8 @@ def recibir_status_cotizacion_segupoliza(payload: dict) -> dict:
         except Exception as e:
             print(f"[segupoliza-status] fallo mandando el status por WhatsApp a {contact_id}: {e}")
     else:
-        print(f"[segupoliza-status] followupid={followup_id}: no encontre ningun contacto activo con este "
-              f"followup_id en REGISTROS_ACTIVOS -- solo se guarda para el modo reactivo (ver "
+        print(f"[segupoliza-status] followupid={followup_id}: no encontre ningun contacto (ni en REGISTROS_ACTIVOS "
+              f"ni consultando GHL directo) -- solo se guarda para el modo reactivo (ver "
               f"obtener_estado_proceso_cotizacion)")
 
     return {"ok": True, "followup_id": followup_id, "error": None}
