@@ -10,6 +10,40 @@ lógica del selector se mueve a operar sobre `DESCRIPCION_LEGIBLE` (ver
 
 ---
 
+## Sesión 2026-09-11 — v6.40 (fix: typo de modelo con palabras acompañantes no sugería)
+
+### Caso real (Jose Sanchez Nuño, Segutreds Chihuahua): "Toyota fj crusier modelo 2010"
+
+El corredor escribió "Toyota fj crusier modelo 2010" (FJ CRUISER con transposición
+I/S) y, al preguntársele el modelo, contestó "FJ CRUSIER AUTOMATICA AIRE
+CONDICIONADO". En ambos casos el bot cayó a la pregunta genérica "¿Qué modelo/línea
+TOYOTA? Por ejemplo: YARIS, COROLLA, HILUX, RAV4, SIENNA, CAMRY." en vez de sugerir
+"FJ CRUISER" -- que sí existe en el catálogo para 2010 (clave 01400100601).
+
+**Causa raíz #1 (`discriminador.extraer_de_texto`):** la sugerencia por typo
+(`difflib.get_close_matches`, cutoff 0.75) se probaba pegando TODOS los tokens de
+la frase juntos ("TOYOTAFJCRUSIER", o "FJCRUSIERAUTOMATICAAIRECONDICIONADO"). La
+marca u otras palabras (trim, equipo) diluían la similitud por debajo del cutoff,
+aunque "FJ CRUSIER" solo (sin acompañantes) sí matcheaba con "FJ CRUISER"
+(ratio 0.89). Fix: igual que el match exacto, ahora se prueba por VENTANAS de
+tokens (de la más larga a la más corta), no la frase completa pegada.
+
+**Causa raíz #2 (`main._evaluar_datos`):** aunque el fuzzy encontrara la
+sugerencia, la rama `elif marca and not linea:` (cuando la marca ya se conoce de
+la sesión, ej. tras decir "Toyota") nunca leía `ses["sugerencias"]` -- solo la
+rama `elif anio and not linea:` lo hacía. La sugerencia se calculaba y guardaba
+en la sesión, pero el mensaje que le llegaba al corredor siempre era la pregunta
+genérica con la lista de ejemplos. Fix: esa rama ahora también revisa
+`ses["sugerencias"]` primero y, si hay, pregunta "¿Quisiste decir: ...?" (igual
+que ya hacía cuando la marca aún no se conocía).
+
+Con los dos fixes, "Toyota fj crusier modelo 2010" sugiere ahora "TOYOTA FJ
+CRUISER" (y "TOYOTA LAND CRUISER", otro match legítimo del catálogo), y
+contestar "fj cruiser" resuelve directo al vehículo. Pruebas nuevas en
+`test_mejoras_v6.py`.
+
+---
+
 ## Sesión 2026-08-14 — v6.2 (fix familias BMW/Mercedes + router multi-producto)
 
 ### Autos — familias «Serie N» (BMW) y «Clase X» (Mercedes)  *(fix del reporte de Armando)*

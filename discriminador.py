@@ -210,11 +210,23 @@ def extraer_de_texto(texto: str, indice) -> dict:
 
     sugerencias: List[str] = []
     if not modelo_texto and tokens:
-        # nada matcheo exacto (probable typo): un ultimo intento con fuzzy
-        # sobre todos los tokens juntos, solo para sugerir -- no resuelve.
-        res = indice.resolver(" ".join(tokens))
-        if res["tipo"] == "sugerencias":
-            sugerencias = res["sugerencias"]
+        # nada matcheo exacto (probable typo): un ultimo intento con fuzzy,
+        # solo para sugerir -- no resuelve. Igual que el match exacto, se
+        # prueba por VENTANAS de tokens (de mas larga a mas corta) en vez de
+        # los tokens completos pegados: si se pega todo ("TOYOTA FJ CRUSIER",
+        # o "FJ CRUSIER AUTOMATICA AIRE CONDICIONADO"), la marca u otras
+        # palabras sueltas diluyen la similitud contra difflib y el typo real
+        # (FJ CRUSIER -> FJ CRUISER) queda por debajo del cutoff aunque el
+        # modelo solo, sin acompañantes, si lo hubiera encontrado.
+        for largo in range(n, 0, -1):
+            if sugerencias:
+                break
+            for inicio in range(0, n - largo + 1):
+                ventana = tokens[inicio:inicio + largo]
+                res = indice.resolver(" ".join(ventana))
+                if res["tipo"] == "sugerencias":
+                    sugerencias = res["sugerencias"]
+                    break
 
     tokens_sobrantes = [t for t in tokens if t not in tokens_usados]
     return {

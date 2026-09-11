@@ -457,9 +457,19 @@ def _evaluar_datos(sid: str) -> ResultadoOut:
         if unica:
             ses["linea"] = unica
             return _evaluar_datos(sid)
-        ejs = indice.lineas_de_marca(marca, 6)
-        cola = ", ".join(ejs) if ejs else "escribe el modelo"
-        p = {"familia": "LINEA", "texto": f"¿Qué modelo/línea {marca}? Por ejemplo: {cola}.", "opciones": ejs}
+        if ses.get("sugerencias"):
+            # Ya se conoce la marca pero el modelo no matcheó exacto (probable
+            # typo, ej. "Toyota FJ Crusier" -> FJ CRUISER): mostrar la
+            # sugerencia en vez de la pregunta generica de "que modelo tienes"
+            # (antes se perdia silenciosamente -- ver ses["sugerencias"] mas
+            # abajo, que ya sabe adoptarla si el usuario contesta "si").
+            texto = (f"No encontré ese modelo {marca}. "
+                     f"¿Quisiste decir: {', '.join(ses['sugerencias'])}?")
+            p = {"familia": "LINEA", "texto": texto, "opciones": ses["sugerencias"]}
+        else:
+            ejs = indice.lineas_de_marca(marca, 6)
+            cola = ", ".join(ejs) if ejs else "escribe el modelo"
+            p = {"familia": "LINEA", "texto": f"¿Qué modelo/línea {marca}? Por ejemplo: {cola}.", "opciones": ejs}
     elif anio and not linea:
         if ses.get("sugerencias"):
             texto = f"¿Qué marca y modelo? (del {anio}). ¿Quisiste decir {', '.join(ses['sugerencias'])}?"

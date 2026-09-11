@@ -227,4 +227,32 @@ check(r["estado"] == "pregunta" and r["pregunta"]["familia"] == "ANIO"
       and "GLE350" in r["pregunta"]["texto"],
       f"'clase gle 350' (con código) resuelve directo a GLE350 (obtuvo {(r.get('pregunta') or {}).get('texto')})")
 
+# ------------------------------------------------------------------ typo con acompañantes
+# (caso real reportado por Jose -- Segutreds Chihuahua): "Toyota fj crusier modelo 2010"
+# no encontraba nada y caía a la pregunta genérica "¿Qué modelo/línea TOYOTA?" con la
+# lista de ejemplos, en vez de sugerir "FJ CRUISER" (el modelo SI existe en 2010, el
+# usuario solo transpuso la I/S). Causa raíz: la sugerencia por fuzzy (difflib) se
+# probaba pegando TODOS los tokens juntos ("TOYOTAFJCRUSIER" o, en el 2o mensaje,
+# "FJCRUSIERAUTOMATICAAIRECONDICIONADO"), y esas palabras de más diluían la similitud
+# por debajo del umbral aunque "FJ CRUSIER" solo sí matcheaba. Ahora se prueba por
+# ventanas de tokens, igual que el match exacto.
+r = interp("Toyota fj crusier modelo 2010")["resultado"]
+check(r["estado"] == "pregunta" and r["pregunta"]["familia"] == "LINEA"
+      and any("CRUISER" in o for o in r["pregunta"]["opciones"]),
+      f"'Toyota fj crusier modelo 2010' -> sugiere FJ CRUISER en vez de pregunta generica "
+      f"(obtuvo {(r.get('pregunta') or {}).get('texto')})")
+sid = r["session_id"]
+r = resp(sid, respuesta="fj cruiser")
+check(r["estado"] == "resuelto" and r["modelo_resuelto"] == "FJ CRUISER"
+      and r["marca"] == "TOYOTA" and r["anio"] == "2010",
+      f"tras la sugerencia, escribir 'fj cruiser' (ya con marca+año en sesion) resuelve "
+      f"directo el vehiculo (obtuvo {r.get('estado')}, {r.get('modelo_resuelto')}, {r.get('clave')})")
+
+# el 2o mensaje del caso real (respuesta a "que modelo", con acompañantes de trim/equipo)
+# también debe sugerir, aunque llegue como mensaje suelto (sin marca de sesión todavía).
+r = interp("FJ CRUSIER AUTOMATICA AIRE CONDICIONADO")
+check(bool(r.get("sugerencias")) and any("CRUISER" in s for s in r["sugerencias"]),
+      f"'FJ CRUSIER AUTOMATICA AIRE CONDICIONADO' (solo, con acompañantes) -> sugiere FJ "
+      f"CRUISER (obtuvo {r.get('sugerencias')})")
+
 print("\n=== TODO OK (mejoras v6) ===")
