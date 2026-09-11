@@ -248,6 +248,29 @@ check(r["estado"] == "resuelto" and r["modelo_resuelto"] == "FJ CRUISER"
       f"tras la sugerencia, escribir 'fj cruiser' (ya con marca+año en sesion) resuelve "
       f"directo el vehiculo (obtuvo {r.get('estado')}, {r.get('modelo_resuelto')}, {r.get('clave')})")
 
+# "MOD"/"MOD." (abreviatura de "modelo" en anuncios de autos usados) y la frase
+# compuesta "año modelo"/"modelo año" no deben colarse como marca/version --
+# ambas palabras ya eran/son stopwords sueltas, así que el orden no importa.
+r = interp("Toyota fj cruiser mod 2010")["resultado"]
+check(r["estado"] == "resuelto" and r["clave"] == "01400100601",
+      f"'Toyota fj cruiser mod 2010' (abreviatura MOD) resuelve directo, sin tratar "
+      f"'mod' como parte de marca/version (obtuvo {r.get('estado')}, {r.get('clave')})")
+
+r = interp("Toyota fj cruiser mod. 2010")["resultado"]
+check(r["estado"] == "resuelto" and r["clave"] == "01400100601",
+      f"'Toyota fj cruiser mod. 2010' (con punto) igual resuelve directo "
+      f"(obtuvo {r.get('estado')}, {r.get('clave')})")
+
+r = interp("Toyota fj cruiser año modelo 2010")["resultado"]
+check(r["estado"] == "resuelto" and r["clave"] == "01400100601",
+      f"'Toyota fj cruiser año modelo 2010' resuelve directo, sin que 'año modelo' "
+      f"se cuele como marca/version (obtuvo {r.get('estado')}, {r.get('clave')})")
+
+r = interp("Toyota fj cruiser modelo año 2010")["resultado"]
+check(r["estado"] == "resuelto" and r["clave"] == "01400100601",
+      f"'Toyota fj cruiser modelo año 2010' (orden invertido) tambien resuelve directo "
+      f"(obtuvo {r.get('estado')}, {r.get('clave')})")
+
 # el 2o mensaje del caso real (respuesta a "que modelo", con acompañantes de trim/equipo)
 # también debe sugerir, aunque llegue como mensaje suelto (sin marca de sesión todavía).
 r = interp("FJ CRUSIER AUTOMATICA AIRE CONDICIONADO")

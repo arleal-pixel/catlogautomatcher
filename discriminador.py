@@ -151,9 +151,14 @@ _STOPWORDS_LIBRE = {
     "QUIERO", "QUISIERA", "NECESITO", "BUSCO", "TENGO", "ES", "SERIA", "SERÁ",
     "UN", "UNA", "UNOS", "UNAS", "EL", "LA", "LOS", "LAS", "DE", "DEL", "PARA",
     "POR", "CON", "MI", "SU", "ESTE", "ESTA", "CARRO", "AUTO", "COCHE",
-    "VEHICULO", "VEHÍCULO", "MODELO", "VERSION", "VERSIÓN", "AÑO", "ANIO",
+    "VEHICULO", "VEHÍCULO", "MODELO", "MOD", "VERSION", "VERSIÓN", "AÑO", "ANIO",
     "COTIZAR", "COTIZACION", "COTIZACIÓN", "PLACAS", "ASEGURAR", "SEGURO",
 }
+# Nota: "MODELO"/"AÑO" sueltos ya cubren "año modelo"/"modelo año" (cada
+# palabra se filtra por separado, sin importar el orden). "DEL" ya estaba
+# arriba (de uso general, ej. "un Jetta del 2020"). "MOD"/"MOD." (con punto --
+# normalizar() ya quita la puntuación antes de tokenizar) es la abreviatura
+# de "modelo" que se ve en anuncios de autos usados, ej. "FJ Cruiser MOD 2010".
 
 
 def extraer_de_texto(texto: str, indice) -> dict:

@@ -10,6 +10,20 @@ lógica del selector se mueve a operar sobre `DESCRIPCION_LEGIBLE` (ver
 
 ---
 
+## Sesión 2026-09-11 — v6.41 (más palabras que indican año, no marca/versión: "MOD", "año modelo")
+
+A petición de Rowter sobre el mismo caso de FJ Cruiser: agregar "MOD"/"MOD."
+(abreviatura de "modelo" común en anuncios de autos usados) a las palabras que
+se descartan antes de buscar marca/modelo, para que "Toyota FJ Cruiser MOD
+2010" no trate "MOD" como parte del nombre. "MODELO" y "AÑO" ya eran stopwords
+sueltas desde antes, así que la frase compuesta "año modelo"/"modelo año" (en
+cualquier orden) ya quedaba cubierta sin cambios -- se agregaron pruebas para
+dejarlo confirmado. "DEL" (ej. "un Jetta del 2020") también ya era stopword de
+antes (de uso general, no específico de año). Pruebas nuevas en
+`test_mejoras_v6.py`.
+
+---
+
 ## Sesión 2026-09-11 — v6.40 (fix: typo de modelo con palabras acompañantes no sugería)
 
 ### Caso real (Jose Sanchez Nuño, Segutreds Chihuahua): "Toyota fj crusier modelo 2010"
